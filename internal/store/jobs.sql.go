@@ -509,8 +509,9 @@ type JobStatusCountsRow struct {
 // The proxy still holds, on this narrower invariant: a job only HAS status
 // 'done' or 'failed' when its last task event was the one that finished it, and
 // a terminal task is unwritable (UpdateTaskStatus and IncrementTaskRetryCount
-// both carry `status IN ('pending','dispatched','running')`), so no later task
-// event can move updated_at while the job sits in a terminal bucket.
+// both carry the non-terminal allow-list, whose canonical copy lives on
+// UpdateTaskStatus), so no later task event can move updated_at while the job
+// sits in a terminal bucket.
 // POST /v1/jobs/{id}/retry does not falsify it either: a retried job leaves both
 // buckets the instant it becomes 'running', and re-enters the appropriate bucket
 // when it finishes again with an updated_at equal to that new finish. The only

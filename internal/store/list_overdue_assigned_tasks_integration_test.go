@@ -55,8 +55,8 @@ func (f *overdueFixture) backdateCreatedAt(t *testing.T, id pgtype.UUID, at time
 }
 
 // dispatched creates a task with the given timeout and claims it at assignedAt.
-// The row never reaches `running`: started_at stays NULL, which is the state a
-// task sits in for the whole workspace sync.
+// The row never reaches `running`, so started_at stays NULL - the half of the
+// execution arm that decides whether it can see the row at all.
 func (f *overdueFixture) dispatched(t *testing.T, name string, timeoutSec *int32, assignedAt time.Time) store.Task {
 	t.Helper()
 	task, err := f.q.CreateTask(f.ctx, store.CreateTaskParams{
@@ -69,6 +69,20 @@ func (f *overdueFixture) dispatched(t *testing.T, name string, timeoutSec *int32
 	})
 	require.NoError(t, err)
 	return claimed
+}
+
+// preparing drives a claimed row to 'preparing'. started_at stays NULL, which is
+// the state a task sits in for the whole workspace sync.
+func (f *overdueFixture) preparing(t *testing.T, name string, timeoutSec *int32, assignedAt time.Time) store.Task {
+	t.Helper()
+	claimed := f.dispatched(t, name, timeoutSec, assignedAt)
+	updated, err := f.q.UpdateTaskStatus(f.ctx, store.UpdateTaskStatusParams{
+		ID: claimed.ID, Status: "preparing", WorkerID: f.w.ID,
+		AssignmentEpoch: claimed.AssignmentEpoch,
+	})
+	require.NoError(t, err)
+	require.False(t, updated.StartedAt.Valid, "precondition: preparing stamps no start time")
+	return updated
 }
 
 // running additionally drives the row to `running` with the given started_at.
@@ -335,4 +349,24 @@ func TestListOverdueAssignedTasks_ZeroLimitReturnsNothing(t *testing.T) {
 	p.MaxRows = 0
 	assert.Empty(t, f.list(t, p),
 		"an unset MaxRows binds LIMIT 0 and sweeps nobody: fail-closed, but silent")
+}
+
+// TestListOverdueAssignedTasks_AbsoluteArmSweepsAPreparingTask is the watchdog
+// spec's R3 obligation at the statement level: a workspace sync must remain
+// bounded by exactly one arm, the absolute one. Omitting `preparing` from this
+// partition reopens the unbounded-assignment hole this statement exists to close,
+// for exactly the state that most needs it.
+func TestListOverdueAssignedTasks_AbsoluteArmSweepsAPreparingTask(t *testing.T) {
+	f := newOverdueFixture(t)
+
+	// timeout_seconds = 0 and started_at NULL: the execution arm cannot see this
+	// row at all, so a positive result can only come from the absolute arm.
+	syncing := f.preparing(t, "syncing", i32(0), f.now.Add(-30*time.Hour))
+	fresh := f.preparing(t, "fresh", i32(0), f.now.Add(-time.Minute))
+
+	got := f.list(t, f.bothArms())
+	assert.True(t, got[syncing.ID],
+		"a preparing task past RELAY_TASK_MAX_ASSIGNMENT must still be swept. Left out of this "+
+			"partition it holds its worker slot and its job forever, unswept, with no log line")
+	assert.False(t, got[fresh.ID], "a freshly-preparing row must be left alone")
 }

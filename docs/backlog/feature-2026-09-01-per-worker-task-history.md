@@ -18,7 +18,7 @@ this node run today, and what failed" has to reconstruct it from `GET /v1/jobs` 
 ## Context
 Widening the active-tasks endpoint with a `?status=` parameter was refused at spec time because
 any widening is an unindexed sequential scan of `tasks`: the only per-worker index is partial
-over `('dispatched','running')`. A history needs its own index and real paging.
+over the currently-assigned partition. A history needs its own index and real paging.
 
 ## Proposal
 - Extend `GET /v1/workers/{id}/tasks` with an allow-listed `?status=` parameter rather than a

@@ -341,10 +341,9 @@ func TestTaskStatusFenceRejections_TwoHandlersDoNotShareCounts(t *testing.T) {
 // loops below assert SQL -> Go (everything the statement admits,
 // taskStatusIsWritable calls writable) and that the terminal triple is not
 // writable. Neither sees a GO-SIDE EXTRA - a status the mirror calls writable
-// that the statement does not admit - which is the edit this file's own
-// production comment anticipates: `preparing` added here ahead of the SQL. That
-// drift mislabels every genuine terminality rejection for such a row as `raced`,
-// quietly zeroing the actionable key for it.
+// that the statement does not admit - the edit this file's own production comment
+// warns about. That drift mislabels every genuine terminality rejection for such
+// a row as `raced`, quietly zeroing the actionable key for it.
 //
 // THE FIRST ATTEMPT AT THAT DIRECTION WAS A UNIVERSE LOOP, AND IT ONLY CLOSED
 // HALF OF IT - measured, not reasoned. Iterating a candidate set and requiring
@@ -552,9 +551,9 @@ func taskStatusWritableLiterals(t *testing.T) []string {
 //
 // THE PROTO IS NOT REDUNDANT WITH THE VOCABULARY and neither subsumes the other,
 // which is why both are here. A status appears in relay.proto BEFORE it is a
-// value in tasks_status_check: TASK_STATUS_PREPARING is in the proto today and
-// the agent already streams LOG_STREAM_PREPARE chunks, so `preparing` is a
-// candidate here years before the column can hold it. Going the other way, a
+// value in tasks_status_check: TASK_STATUS_PREPARE_FAILED is in the proto today
+// and the agent already sends it, so `prepare_failed` is a candidate here while
+// the column cannot hold it. Going the other way, a
 // status can be a legal column value with no wire spelling at all, which is
 // exactly the `cancelled` shape above. The union is what makes this a property
 // rather than a spelling.
@@ -592,51 +591,286 @@ func taskStatusUniverse(t *testing.T, sqlAllowList []string) []string {
 }
 
 // tasksStatusVocabulary reads the literal set of tasks_status_check out of the
-// migration that adds it - the same constraint
+// LAST up-migration that adds it - the same constraint
 // internal/store/tasks_status_vocabulary_lockstep_test.go reads back off a live
 // Postgres. This lane cannot reach a database (it is the no-tag CI lane), so it
 // reads the source the constraint is built from instead.
-//
-// IT SCANS EVERY up-MIGRATION AND REQUIRES EXACTLY ONE DEFINITION rather than
-// opening 000019 by name. A hard-coded path goes stale silently the day a later
-// migration drops and re-adds the constraint with a wider set: this parse would
-// keep returning the old vocabulary and the guard would keep passing. With the
-// scan, that edit makes the count 2 and this fails with a message that says
-// which files. The down-migrations are excluded because 000019's drops the
-// constraint by name and would otherwise be a second hit.
 func tasksStatusVocabulary(t *testing.T) []string {
 	t.Helper()
-	dir := filepath.Join("..", "store", "migrations")
-	entries, err := os.ReadDir(dir)
+	out, err := tasksStatusVocabularyIn(filepath.Join("..", "store", "migrations"))
 	require.NoError(t, err)
+	return out
+}
+
+// tasksStatusVocabularyIn is the parse, taking the directory so that
+// TestTasksStatusVocabularyInRefusesAStaleParse can drive it over fixtures. It
+// reports a refusal as an error rather than failing a *testing.T for the same
+// reason - refusing is the behaviour under test, and a helper that ends the test
+// cannot be asserted about.
+//
+// IT SCANS EVERY up-MIGRATION AND TAKES THE LAST MATCH IN os.ReadDir ORDER. A
+// hard-coded path, or taking the first match, reads a superseded vocabulary
+// forever while passing - a fail-open, because the universe it feeds would no
+// longer contain every status a row can hold. os.ReadDir orders by filename, so
+// that selection is only the newest definition while filename order agrees with
+// migration-version order; the version comparison below is what makes that a
+// checked premise rather than an assumption.
+//
+// `--` COMMENT LINES ARE STRIPPED BEFORE MATCHING, so that a migration's own doc
+// block quoting a prior vocabulary is not mistaken for a real definition. That
+// strip is also why a file whose EXECUTABLE text names the constraint but yields
+// no match is refused: the regex is formatting-sensitive, and a parse that
+// silently skips the newest migration returns an older, narrower vocabulary
+// while every comparison it feeds still passes. A migration that drops or
+// renames the constraint without re-adding it is refused by that same rung, and
+// deliberately - afterwards there is no constraint to read a vocabulary from, so
+// the alternative to refusing is handing back a superseded one. The
+// down-migrations are excluded because they drop or re-add the constraint by
+// name.
+func tasksStatusVocabularyIn(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
 
 	// `\s` spans newlines, which matters: the ALTER TABLE is written across
 	// three lines with the constraint name on its own.
 	def := regexp.MustCompile(`ADD CONSTRAINT tasks_status_check\s+CHECK \(status IN \(([^)]*)\)`)
 	quoted := regexp.MustCompile(`'([a-z_]+)'`)
 
-	var out, from []string
+	type hit struct {
+		file     string
+		statuses []string
+	}
+	var hits []hit
+	var named []string // up-migrations whose EXECUTABLE text names the constraint
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".up.sql") {
 			continue
 		}
 		src, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		require.NoError(t, err)
-		for _, m := range def.FindAllStringSubmatch(string(src), -1) {
-			from = append(from, e.Name())
-			for _, q := range quoted.FindAllStringSubmatch(m[1], -1) {
-				out = append(out, q[1])
+		if err != nil {
+			return nil, err
+		}
+
+		// Executable text only. See the comment-strip paragraph above.
+		var stripped []string
+		for _, line := range strings.Split(string(src), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "--") {
+				continue
 			}
+			stripped = append(stripped, line)
+		}
+		body := strings.Join(stripped, "\n")
+
+		if strings.Contains(body, "tasks_status_check") {
+			named = append(named, e.Name())
+		}
+		for _, m := range def.FindAllStringSubmatch(body, -1) {
+			var statuses []string
+			for _, q := range quoted.FindAllStringSubmatch(m[1], -1) {
+				statuses = append(statuses, q[1])
+			}
+			hits = append(hits, hit{file: e.Name(), statuses: statuses})
 		}
 	}
 
-	require.Len(t, from, 1,
-		"expected exactly one up-migration to ADD CONSTRAINT tasks_status_check, found %d (%v). If the "+
-			"constraint is now dropped and re-added, this parse is reading a stale vocabulary and the "+
-			"universe it feeds no longer contains every status a row can hold. Re-derive it.", len(from), from)
-	require.NotEmpty(t, out,
-		"parsed no statuses out of tasks_status_check in %s; the parse is broken, not the code", from[0])
-	return out
+	if len(hits) == 0 {
+		return nil, fmt.Errorf("no up-migration in %s ADDs CONSTRAINT tasks_status_check. Either the "+
+			"constraint moved, or this parse no longer matches the migration's formatting - which is a "+
+			"FAIL-OPEN, because a parse that silently returns nothing makes every comparison it feeds "+
+			"vacuous. Re-derive it.", dir)
+	}
+	matched := map[string]bool{}
+	for _, h := range hits {
+		matched[h.file] = true
+	}
+	for _, f := range named {
+		if matched[f] {
+			continue
+		}
+		return nil, fmt.Errorf("%s names tasks_status_check in its executable text and this parse "+
+			"found no ADD CONSTRAINT ... CHECK definition in it. Either the definition's formatting "+
+			"moved out of the regex's reach, or the constraint was dropped or renamed. Either way "+
+			"this helper would silently return an older migration's narrower vocabulary; "+
+			"re-derive it.", f)
+	}
+
+	last := hits[len(hits)-1]
+	lastVersion, err := migrationVersion(last.file)
+	if err != nil {
+		return nil, err
+	}
+	for _, h := range hits {
+		v, err := migrationVersion(h.file)
+		if err != nil {
+			return nil, err
+		}
+		if v > lastVersion {
+			return nil, fmt.Errorf("this parse takes the last match in os.ReadDir's FILENAME order "+
+				"and got %s at version %d, but %s has the higher migration VERSION %d and is what "+
+				"golang-migrate applies last. The two orders agree only while every filename is "+
+				"zero-padded to the same width, and nothing enforces that. This helper is reading a "+
+				"STALE vocabulary and the universe it feeds no longer contains every status a row "+
+				"can hold.", last.file, lastVersion, h.file, v)
+		}
+	}
+	if len(last.statuses) == 0 {
+		return nil, fmt.Errorf(
+			"parsed no statuses out of tasks_status_check in %s; the parse is broken, not the code",
+			last.file)
+	}
+	return last.statuses, nil
+}
+
+// migrationVersion is the numeric prefix golang-migrate orders by, which is the
+// property the caller needs; filename order is only a proxy for it.
+func migrationVersion(name string) (int, error) {
+	digits := name[:len(name)-len(strings.TrimLeft(name, "0123456789"))]
+	if digits == "" {
+		return 0, fmt.Errorf("migration %s has no numeric version prefix", name)
+	}
+	v, err := strconv.Atoi(digits)
+	if err != nil {
+		return 0, fmt.Errorf("migration %s has the version prefix %q, which is not a usable "+
+			"number: %w", name, digits, err)
+	}
+	return v, nil
+}
+
+// The fixture bodies the refusal test below builds its migrations directories
+// from. They are deliberately unlike the real migrations: two statuses, no
+// index, no doc block, so that a failure is about the parse and nothing else.
+const (
+	fixtureBaseVocabulary = `ALTER TABLE tasks
+  ADD CONSTRAINT tasks_status_check
+  CHECK (status IN ('pending','done'));
+`
+	fixtureWidenedVocabulary = `ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_status_check;
+
+ALTER TABLE tasks
+  ADD CONSTRAINT tasks_status_check
+  CHECK (status IN ('pending','done','cancelled'));
+`
+	fixtureWidenedTrailingComment = `ALTER TABLE tasks
+  ADD CONSTRAINT tasks_status_check -- widened for cancellation
+  CHECK (status IN ('pending','done','cancelled'));
+`
+	fixtureWidenedAnyArray = `ALTER TABLE tasks
+  ADD CONSTRAINT tasks_status_check
+  CHECK (status = ANY (ARRAY['pending','done','cancelled']));
+`
+)
+
+// TestTasksStatusVocabularyInRefusesAStaleParse pins the rungs that make
+// tasksStatusVocabularyIn fail CLOSED. The repository's own migrations directory
+// parses cleanly, so on it both rungs are inert: deleting one leaves the real
+// caller green while the fail-open it exists to close reopens in silence. These
+// fixtures are the inputs that separate them.
+//
+// Each case is a whole DIRECTORY because each rung is a property of the
+// directory rather than of one file: one compares the files that name the
+// constraint against the files that yielded a definition, the other compares the
+// selected file's version against every other match's.
+//
+// Why each input discriminates:
+//
+//   - TRAILING COMMENT. The strip drops only lines whose trimmed prefix is `--`,
+//     so a comment at the END of the constraint line survives into the body and
+//     `\s+CHECK` stops matching. The file names the constraint and yields
+//     nothing, and without the rung the helper returns the base file's narrower
+//     vocabulary with `cancelled` invisible.
+//   - ANY (ARRAY[...]). A legal rewrite of the same CHECK that the regex does
+//     not spell. Same outcome as above, from a different cause, which is why the
+//     refusal message must not name a formatting cause specifically.
+//   - FIVE-DIGIT PAD. `00019_` sorts AFTER `000023_` in filename order while
+//     being the EARLIER migration version, so the lexical selection and the
+//     version order disagree. Without the rung the helper returns the OLDER
+//     vocabulary.
+//   - UNUSABLE VERSION PREFIX. A prefix too long for strconv.Atoi. The refusal
+//     has to name the file and the digits or the reader is left with a bare
+//     range error and no way to find which of the migrations produced it.
+//
+// A DROP CONSTRAINT or RENAME CONSTRAINT with no re-add takes the first rung
+// too, and that is the intended outcome rather than a false positive: after one
+// there is no constraint left to read a vocabulary from, so the alternative to
+// refusing is returning a superseded one.
+func TestTasksStatusVocabularyInRefusesAStaleParse(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+		// Substrings the refusal must carry. A reader who hits one of these
+		// needs the offending FILENAME, or the message sends them reading the
+		// whole directory.
+		wantInError []string
+	}{
+		{
+			name: "a trailing comment hides the newest definition",
+			files: map[string]string{
+				"000001_init.up.sql":  fixtureBaseVocabulary,
+				"000023_widen.up.sql": fixtureWidenedTrailingComment,
+			},
+			wantInError: []string{"000023_widen.up.sql", "no ADD CONSTRAINT"},
+		},
+		{
+			name: "an ANY (ARRAY[...]) rewrite hides the newest definition",
+			files: map[string]string{
+				"000001_init.up.sql":  fixtureBaseVocabulary,
+				"000023_widen.up.sql": fixtureWidenedAnyArray,
+			},
+			wantInError: []string{"000023_widen.up.sql", "no ADD CONSTRAINT"},
+		},
+		{
+			name: "a narrower pad sorts last while being an earlier version",
+			files: map[string]string{
+				"000023_widen.up.sql":   fixtureWidenedVocabulary,
+				"00019_backport.up.sql": fixtureBaseVocabulary,
+			},
+			wantInError: []string{"00019_backport.up.sql", "000023_widen.up.sql", "VERSION"},
+		},
+		{
+			name: "a version prefix too long to be a number",
+			files: map[string]string{
+				"000001_init.up.sql":                  fixtureBaseVocabulary,
+				"00000000000000000000123_huge.up.sql": fixtureWidenedVocabulary,
+			},
+			wantInError: []string{"00000000000000000000123_huge.up.sql", "00000000000000000000123"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, body := range tc.files {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600))
+			}
+			got, err := tasksStatusVocabularyIn(dir)
+			require.Error(t, err,
+				"tasksStatusVocabularyIn accepted this directory and returned %v. It must refuse: the "+
+					"vocabulary it would hand back is not the one the newest migration defines, and "+
+					"every comparison it feeds would still pass.", got)
+			for _, want := range tc.wantInError {
+				require.Contains(t, err.Error(), want,
+					"the refusal must name %q so the reader can find the offending migration", want)
+			}
+		})
+	}
+}
+
+// TestTasksStatusVocabularyInReadsTheRepositoryMigrations is the other half of
+// the pair above: the rungs must refuse the fixtures AND accept the real
+// directory, or a helper that refused everything would satisfy them all.
+//
+// The expected set is written out here rather than derived from the migrations,
+// so widening the column is a deliberate two-sided edit.
+func TestTasksStatusVocabularyInReadsTheRepositoryMigrations(t *testing.T) {
+	got, err := tasksStatusVocabularyIn(filepath.Join("..", "store", "migrations"))
+	require.NoError(t, err)
+	require.Equal(t,
+		[]string{"pending", "dispatched", "preparing", "running", "done", "failed", "timed_out"},
+		got,
+		"tasks_status_check moved. If the column really did gain or lose a status, update this list "+
+			"and read TestTasksStatusVocabularyIsExactly's site census before doing so; otherwise the "+
+			"parse is reading the wrong migration.")
 }
 
 // TestClassifyStatusFenceRejection is the classifier's own truth table, with the

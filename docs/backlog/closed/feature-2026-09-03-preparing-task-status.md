@@ -1,7 +1,9 @@
 ---
 title: Persist the `preparing` task status so a workspace sync is distinguishable from a wedged agent
 type: feature
-status: open
+status: closed
+closed: 2026-09-04
+resolution: fixed
 created: 2026-09-03
 priority: high
 source: SDNM fork divergence analysis (relay_updates.md, PR-8), evaluated 2026-09-03; CLAUDE.md already names `preparing` as the live candidate
@@ -103,3 +105,24 @@ and `TestTaskStatusWritableSetMatchesTheSQLAllowList` pins the Go side.
 - [[feature-2026-07-01-per-task-timing]] - the `started_at` semantics this item must not change
 - [[feature-2026-09-03-p4-sync-progress-heartbeat]] - what the panel shows during `preparing`
 - [[bug-2026-09-03-prepare-failure-error-message-is-discarded]]
+
+## Resolution
+
+Shipped as one slice. Migration 000023 widens `tasks_status_check` to seven values
+and widens the partial index `idx_tasks_worker_active` in the same migration - a
+fourteenth site the item did not name, and the one that would have made the index
+unusable for all eight assignment-partition statements including the dispatcher's
+per-cycle `CountActiveTasksByAllWorkers`. Thirteen predicates in
+`internal/store/query/tasks.sql` gained `preparing`, `handleTaskStatus` gained the
+`TASK_STATUS_PREPARING` case with `started_at` still stamped at `running` only, and
+`taskStatusIsWritable` plus the cancel-signal collection in `internal/api/jobs.go`
+moved in lockstep. Clients: the SPA's `TaskStatus` union, `taskStatusColor`, the job
+detail page's active count and default task selection, and the Python SDK enum.
+
+`RequeueTask` deliberately did not gain `preparing`: its only caller fires when the
+`DispatchTask` was never delivered, so the agent cannot have reported a status that
+only a delivered dispatch can produce.
+
+The item's Python compatibility case did not exist - `Task.status` is `Optional[str]`,
+so an unknown value cannot raise - and its "each went red first" criterion was partly
+false, since three properties cannot go red at HEAD. Both are recorded in the spec.

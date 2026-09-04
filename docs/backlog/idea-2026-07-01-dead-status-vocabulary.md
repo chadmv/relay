@@ -17,7 +17,7 @@ contradicts the schema and can mislead a reader about what states exist.
 
 ## Context
 Surfaced by the 2026-06-26 `/roadmap deep` gaps sweep. Migration `000019_status_vocabulary_checks`
-constrains task status to `('pending','dispatched','running','done','failed','timed_out')` and job
+constrains task status to the vocabulary `TestTasksStatusVocabularyIsExactly` pins, and job
 status to `('pending','running','done','failed','cancelled')`.
 
 ## Proposal
@@ -37,7 +37,7 @@ constraints. It is **not** about valid statuses that happen to be unreachable th
 statement's other predicates. The distinction now matters, because the 2026-08-14 trailing-window
 slice created a live example that a sweep would otherwise "clean up":
 
-`AppendTaskLog`'s fence carries `status IN ('pending','dispatched','running')` as the first arm of a
+`AppendTaskLog`'s fence carries the non-terminal allow-list as the first arm of a
 disjunction. **`'pending'` is provably unreachable there**: every statement that returns a task to
 `pending` also sets `worker_id = NULL` in the same UPDATE, and the fence's `t.worker_id = $3`
 predicate is a NULL-rejecting plain `=`, so a pending row can never match. It is kept anyway, and

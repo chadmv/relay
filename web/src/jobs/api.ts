@@ -147,10 +147,10 @@ export function listJobsInWindow(
   return apiFetch<JobsPage>(`/jobs?${p}`, { signal })
 }
 
-// Task-status vocabulary (migration 000019). Distinct from JobStatus: tasks add
-// `dispatched` and `timed_out` and never use `cancelled` (a cancelled job's
-// tasks are marked `failed` server-side).
-export type TaskStatus = 'pending' | 'dispatched' | 'running' | 'done' | 'failed' | 'timed_out'
+// Task-status vocabulary. Distinct from JobStatus: tasks add `dispatched`,
+// `preparing` and `timed_out` and never use `cancelled` (a cancelled job's tasks
+// are marked `failed` server-side).
+export type TaskStatus = 'pending' | 'dispatched' | 'preparing' | 'running' | 'done' | 'failed' | 'timed_out'
 
 // One task as returned inside GET /v1/jobs/:id. `depends_on` is task NAMES, not
 // IDs, resolved server-side; omitted when the task has no dependencies.

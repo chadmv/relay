@@ -171,7 +171,7 @@ export interface WorkerTask {
   job_id: string
   job_name: string
   assigned_at?: string
-  // Absent, not null, for a dispatched task that has not begun executing.
+  // Absent, not null, until the task actually begins executing.
   started_at?: string
 }
 
@@ -181,8 +181,8 @@ export interface WorkerTasksPage {
   total: number
 }
 
-// The worker's currently assigned tasks (dispatched or running), newest
-// assignment first. One page, no cursor: `total` is the active count for the
+// The worker's currently-assigned partition of tasks, newest assignment
+// first. One page, no cursor: `total` is the active count for the
 // whole worker, so the Slots KPI is exact, but `items` can still stop short of
 // it and the caller must say so rather than presenting the table as complete.
 // 200 is the server maximum and a literal, because a value outside [1, 200] is

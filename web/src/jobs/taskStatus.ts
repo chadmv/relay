@@ -6,14 +6,15 @@ interface StatusView {
 }
 
 // Color mapping for the TASK status vocabulary (distinct from status.ts, which
-// only knows the JOB set). done=ok, running/dispatched=accent, pending=warn,
-// failed/timed_out=err.
+// only knows the JOB set). done=ok, running/dispatched/preparing=accent,
+// pending=warn, failed/timed_out=err.
 export function taskStatusColor(status: TaskStatus): StatusView {
   switch (status) {
     case 'done':
       return { text: 'text-ok', dot: 'bg-ok' }
     case 'running':
     case 'dispatched':
+    case 'preparing':
       return { text: 'text-accent', dot: 'bg-accent' }
     case 'pending':
       return { text: 'text-warn', dot: 'bg-warn' }

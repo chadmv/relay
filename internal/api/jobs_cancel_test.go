@@ -316,3 +316,76 @@ func TestCancelJob_NonOwner_404_NoSideEffects(t *testing.T) {
 	// 3. No agent CancelTask signal was sent.
 	assert.Empty(t, env.cs.snapshot())
 }
+
+// seedPreparingTask is seedRunningTask with the row left at `preparing` - the
+// state a source-bearing task holds for the whole workspace sync.
+func seedPreparingTask(t *testing.T, env *cancelTestEnv, userID pgtype.UUID) string {
+	t.Helper()
+	ctx := t.Context()
+
+	job, err := env.q.CreateJob(ctx, store.CreateJobParams{
+		Name:        "cancel-preparing-job",
+		Priority:    "normal",
+		SubmittedBy: userID,
+		Labels:      []byte("{}"),
+	})
+	require.NoError(t, err)
+
+	task, err := env.q.CreateTask(ctx, store.CreateTaskParams{
+		JobID:    job.ID,
+		Name:     "cancel-preparing-task",
+		Commands: []byte(`[["sleep","30"]]`),
+		Env:      []byte("{}"),
+		Requires: []byte("{}"),
+		Retries:  0,
+	})
+	require.NoError(t, err)
+
+	claimed, err := env.q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID:       task.ID,
+		WorkerID: env.workerID,
+	})
+	require.NoError(t, err)
+
+	preparing, err := env.q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
+		Status: "preparing",
+		ID:     claimed.ID,
+		Epoch:  claimed.AssignmentEpoch,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "preparing", preparing.Status)
+	require.False(t, preparing.StartedAt.Valid, "a preparing row has no start time")
+
+	return uuidString(job.ID)
+}
+
+// TestCancelJob_SendsACancelSignalForAPreparingTask is preservation, not a new
+// capability: before this slice a syncing task's row is `dispatched`, so it is
+// collected today, and it stops being collected the moment the row stops being
+// dispatched.
+//
+// Its RED is the Go filter in internal/api/jobs.go, NOT the SQL: it is meaningful
+// only against a tree where CancelJobTasks already admits `preparing`, or it goes
+// red for the wrong reason and proves nothing about the filter.
+//
+// The agent side needs no change: internal/agent/agent.go's handleCancel looks the
+// runner up in a.runners, which is populated before Runner.Run sends PREPARING, so
+// r.Cancel(force) cancels the context provider.Prepare is running under.
+func TestCancelJob_SendsACancelSignalForAPreparingTask(t *testing.T) {
+	env := newCancelTestServer(t)
+	user := createTestUser(t, env.q, "Prep", "cancel-preparing@example.com", false)
+	token := createTestToken(t, env.q, user.ID)
+	jobID := seedPreparingTask(t, env, user.ID)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/jobs/"+jobID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	env.srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	msgs := env.cs.snapshot()
+	require.Len(t, msgs, 1,
+		"a preparing task's agent must be told to stop. Without it the task is failed in the "+
+			"database and its p4 sync keeps running against the workspace, orphaned")
+	require.NotNil(t, msgs[0].GetCancelTask())
+}

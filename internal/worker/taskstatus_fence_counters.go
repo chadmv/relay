@@ -218,19 +218,21 @@ func (c *statusFenceCounters) snapshot() TaskStatusFenceCounts {
 // comparison existed; the guard iterated a candidate set instead, and `cancelled`
 // added here went through it green.
 //
-// A NEW NON-TERMINAL STATUS (`preparing` is the live candidate: TASK_STATUS_
-// PREPARING is already in the proto) MUST BE ADDED HERE at the same time it is
-// added to those two SQL allow-lists, or a rejection for such a row is labelled
+// A NEW NON-TERMINAL STATUS MUST BE ADDED HERE at the same time it is added to
+// those two SQL allow-lists, or a rejection for such a row is labelled
 // `duplicate`/`conflicting` when it is in fact a race. Adding it here first
 // fails the set comparison; adding it to the SQL first fails the containment
-// loop. Either order goes RED until both sides move.
+// loop. Either order goes RED until both sides move. A new TERMINAL status
+// stays out: a task-level `cancelled` is the counter-example, since admitting
+// it here would make every genuine terminality rejection for such a row read as
+// a healthy race.
 //
 // KEEP THE STATUSES SPELLED INLINE. Moving them to a var, a const or another
 // function is not a refactor here - it is what the guard's own fail-closed arm
 // exists for, and it fails with a message saying so.
 func taskStatusIsWritable(status string) bool {
 	switch status {
-	case "pending", "dispatched", "running":
+	case "pending", "dispatched", "preparing", "running":
 		return true
 	}
 	return false

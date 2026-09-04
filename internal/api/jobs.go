@@ -905,17 +905,21 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cancel all non-terminal tasks; collect running/dispatched ones for agent signals.
+	// Cancel all non-terminal tasks; collect the currently-assigned ones for agent
+	// signals.
 	tasks, err := q.ListTasksByJob(ctx, id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	// Collect running/dispatched tasks for agent cancel signals before the
-	// bulk update clears their worker_id.
+	// Collect the assignment partition for agent cancel signals before the bulk
+	// update clears their worker_id. A status in that partition and missing here
+	// leaves a live agent executing against a task the database has already
+	// failed, so this list must move whenever the partition does; it is the same
+	// set CancelJobTasks' non-terminal predicate fails.
 	var runningTasks []store.Task
 	for _, t := range tasks {
-		if (t.Status == "running" || t.Status == "dispatched") && t.WorkerID.Valid {
+		if (t.Status == "running" || t.Status == "dispatched" || t.Status == "preparing") && t.WorkerID.Valid {
 			runningTasks = append(runningTasks, t)
 		}
 	}

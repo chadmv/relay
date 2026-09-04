@@ -73,8 +73,9 @@ func names(p pageEnvelope[map[string]any]) []string {
 	return out
 }
 
-// Only the assignment partition. Seeds one task per status of the full six-value
-// vocabulary and asserts exactly the two assigned ones come back.
+// Only the assignment partition. Seeds one task per status of the vocabulary and
+// asserts exactly the assigned ones come back; TestTasksStatusVocabularyIsExactly
+// owns the vocabulary's size.
 func TestListWorkerTasks_ReturnsOnlyTheAssignmentPartition(t *testing.T) {
 	srv, q, pool := newTestServerWithPool(t)
 	user := createTestUser(t, q, "Part", "partition@tasks-test.com", false)
@@ -83,15 +84,15 @@ func TestListWorkerTasks_ReturnsOnlyTheAssignmentPartition(t *testing.T) {
 	jobID := seedJob(t, pool, user, "nightly-render")
 
 	at := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
-	for i, status := range []string{"pending", "dispatched", "running", "done", "failed", "timed_out"} {
+	for i, status := range []string{"pending", "dispatched", "preparing", "running", "done", "failed", "timed_out"} {
 		ts := at.Add(time.Duration(i) * time.Minute)
 		seedWorkerTask(t, pool, jobID, workerID, "t-"+status, status, &ts, nil)
 	}
 
 	code, p := getWorkerTasks(t, srv, token, workerID, "")
 	require.Equal(t, http.StatusOK, code)
-	assert.ElementsMatch(t, []string{"t-dispatched", "t-running"}, names(p))
-	assert.EqualValues(t, 2, p.Total,
+	assert.ElementsMatch(t, []string{"t-dispatched", "t-preparing", "t-running"}, names(p))
+	assert.EqualValues(t, 3, p.Total,
 		"total slices the same partition as items; a count that disagrees shows an operator a "+
 			"fraction the rows underneath it contradict")
 }

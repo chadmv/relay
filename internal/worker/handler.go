@@ -1476,6 +1476,12 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	// Map proto enum to string status.
 	var statusStr string
 	switch upd.Status {
+	case relayv1.TaskStatus_TASK_STATUS_PREPARING:
+		// Non-terminal, and it stamps no started_at: see the timestamp block
+		// below. PREPARING arrives before the workspace sync begins, so a clock
+		// started here would run for the whole sync and the watchdog's execution
+		// arm would sweep a healthy task mid-sync.
+		statusStr = "preparing"
 	case relayv1.TaskStatus_TASK_STATUS_RUNNING:
 		statusStr = "running"
 	case relayv1.TaskStatus_TASK_STATUS_DONE:

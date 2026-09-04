@@ -72,14 +72,13 @@ SELECT * FROM tasks WHERE job_id = $1 ORDER BY created_at;
 -- repeating it; change both or neither.
 --   * It is an ALLOW-LIST, not the complement deny-list, and that choice is
 --     load-bearing even though the two are exactly equivalent against today's
---     vocabulary (migration 000019's tasks_status_check pins it to the six
---     values pending/dispatched/running/done/failed/timed_out). A deny-list
---     fails OPEN on the next status added: a task-level `cancelled` is a
---     plausible near-term addition, because CancelJobTasks currently squashes
---     cancellation onto `failed`, and under `NOT IN (terminal)` such a status
---     would be silently writable and would re-open the resurrection this
---     predicate closes. The allow-list fails closed instead - a new status is
---     unwritable until somebody decides it should be. Every other status
+--     vocabulary. A deny-list fails OPEN on the next status added: a task-level
+--     `cancelled` is a plausible near-term addition, because CancelJobTasks
+--     currently squashes cancellation onto `failed`, and under
+--     `NOT IN (terminal)` such a status would be silently writable and would
+--     re-open the resurrection this predicate closes. The allow-list fails
+--     closed instead - a new status is unwritable until somebody decides it
+--     should be. Every other status
 --     predicate in this file is already an allow-list; these two now match.
 --   * The set is the complement of the terminal set RecomputeJobStatus counts
 --     (see the RecomputeJobStatus statement in jobs.sql - by name, because line
@@ -133,7 +132,7 @@ SET status = sqlc.arg(status),
 WHERE id = sqlc.arg(id)
   AND assignment_epoch = sqlc.arg(assignment_epoch)
   AND worker_id = sqlc.arg(worker_id)
-  AND status IN ('pending', 'dispatched', 'running')
+  AND status IN ('pending', 'dispatched', 'preparing', 'running')
 RETURNING *;
 
 -- name: IncrementTaskRetryCount :one
@@ -227,7 +226,7 @@ SET retry_count = retry_count + 1,
 WHERE id = sqlc.arg(id)
   AND assignment_epoch = sqlc.arg(assignment_epoch)
   AND worker_id = sqlc.arg(worker_id)
-  AND status IN ('pending', 'dispatched', 'running')
+  AND status IN ('pending', 'dispatched', 'preparing', 'running')
   AND retry_count < retries
 RETURNING *;
 
@@ -307,15 +306,15 @@ SELECT depends_on_task_id FROM task_dependencies WHERE task_id = $1;
 --     omission is catastrophic and silent: a new NON-TERMINAL status left out of
 --     this arm drops 100% of that state's log output, because a non-terminal row
 --     has finished_at IS NULL and therefore fails the second arm too, and the
---     drop produces no error and no log line anywhere. That is not hypothetical:
---     TASK_STATUS_PREPARING already exists in proto/relayv1/relay.proto and the
---     agent already streams prepare progress as LOG_STREAM_PREPARE chunks
---     (internal/agent/runner.go, makePrepareProgressFn) while the row is still
---     `dispatched`. The day `preparing` becomes a persisted status and is not
---     added here, every workspace-sync log line in the system disappears. Its
---     twin TASK_STATUS_PREPARE_FAILED needs the OPPOSITE treatment: a new
---     TERMINAL status stays OUT and is then bounded by finished_at like
---     done/failed/timed_out. TestTasksStatusVocabularyIsExactly names this site.
+--     drop produces no error and no log line anywhere. `preparing` is in this
+--     arm for exactly that reason: the agent streams a workspace sync's progress
+--     as LOG_STREAM_PREPARE chunks (internal/agent/runner.go,
+--     makePrepareProgressFn) for the whole time the row sits in it, and a row in
+--     that state has no finished_at. TASK_STATUS_PREPARE_FAILED is the live
+--     instance of the OPPOSITE shape: a new TERMINAL status stays OUT and is then
+--     bounded by finished_at like done/failed/timed_out.
+--     TestTasksStatusVocabularyIsExactly names this site, and
+--     TestAppendTaskLog_APreparingTaskAcceptsLogChunks pins the positive arm.
 --   * min_finished_at is an ABSOLUTE cutoff computed in Go as
 --     time.Now().Add(-window), never NOW() - interval. Every finished_at
 --     reachable through this fence was written by *a* relay-server's Go clock
@@ -350,7 +349,7 @@ WITH fence AS (
     WHERE t.id = sqlc.arg(task_id)
       AND t.assignment_epoch = sqlc.arg(assignment_epoch)
       AND t.worker_id = sqlc.arg(worker_id)
-      AND (t.status IN ('pending', 'dispatched', 'running')
+      AND (t.status IN ('pending', 'dispatched', 'preparing', 'running')
            OR t.finished_at > sqlc.arg(min_finished_at)::timestamptz)
 ), ins AS (
     INSERT INTO task_logs (task_id, stream, content)
@@ -383,7 +382,7 @@ WHERE status = 'pending'
 -- generations can be rejected. Returns pgx.ErrNoRows if the task is no longer
 -- pending (another dispatcher already claimed it, or the row vanished).
 -- THIS IS THE ONLY LOAD-BEARING WRITE OF assigned_at. It is the sole route into
--- the ('dispatched','running') partition that ListOverdueAssignedTasks scans, so
+-- the currently-assigned partition that ListOverdueAssignedTasks scans, so
 -- a stale assigned_at left behind by a requeue can never be observed by the
 -- watchdog: this statement overwrites it on the way back in. assigned_at is
 -- supplied by the caller's Go clock, never NOW(), so it is directly comparable
@@ -445,11 +444,13 @@ RETURNING *;
 -- no log line anywhere, the same end state as its sibling.
 --
 -- THE STATUS PREDICATE STAYS 'dispatched' ONLY, pinned by
--- TestRequeueTask_RunningTaskIsNotRequeuedByTheSendFailurePath. Do not widen it
--- to include 'running' for symmetry with RequeueTaskByID: at this caller's own
--- (epoch, worker) pair the task cannot have reported running - for any agent
--- that only reports epochs it was actually dispatched - because the Send that
--- would have delivered the dispatch is the thing that just failed.
+-- TestRequeueTask_RunningTaskIsNotRequeuedByTheSendFailurePath and
+-- TestRequeueTask_APreparingTaskIsNotRequeuedByTheSendFailurePath. Do not widen
+-- it to the rest of the currently-assigned partition for symmetry with
+-- RequeueTaskByID: at this caller's own (epoch, worker) pair the task cannot have
+-- reported any status that only a dispatched agent can send - for any agent that
+-- only reports epochs it was actually dispatched - because the Send that would
+-- have delivered the dispatch is the thing that just failed.
 -- BE PRECISE ABOUT WHAT THAT PROOF COVERS, because the next reader will use this
 -- paragraph to decide whether the epoch is coordinator-side or agent-side.
 -- workerSender.Send has exactly TWO error values, ErrWorkerDisconnected and
@@ -502,7 +503,7 @@ WHERE id = sqlc.arg(id)
 -- running_tasks report.
 SELECT id, assignment_epoch
 FROM tasks
-WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+WHERE worker_id = $1 AND status IN ('dispatched', 'preparing', 'running')
 ORDER BY id;
 
 -- name: ListGraceCandidates :many
@@ -512,7 +513,7 @@ ORDER BY id;
 SELECT DISTINCT w.id, w.disconnected_at, w.connection_epoch
 FROM workers w
 JOIN tasks t ON t.worker_id = w.id
-WHERE t.status IN ('dispatched', 'running');
+WHERE t.status IN ('dispatched', 'preparing', 'running');
 
 -- name: RequeueTaskByID :execrows
 -- Revert a single ASSIGNED task back to 'pending', on FOUR predicates. Each
@@ -598,7 +599,7 @@ SET status = 'pending',
 WHERE id = sqlc.arg(id)
   AND assignment_epoch = sqlc.arg(assignment_epoch)
   AND worker_id = sqlc.arg(worker_id)
-  AND status IN ('dispatched', 'running');
+  AND status IN ('dispatched', 'preparing', 'running');
 
 -- name: NotifyTaskSubmitted :exec
 -- Wakes any LISTENers on relay_task_submitted. Payload is empty; listeners
@@ -615,7 +616,7 @@ SELECT pg_notify('relay_task_completed', '');
 SELECT worker_id, count(*)::bigint AS active
 FROM tasks
 WHERE worker_id IS NOT NULL
-  AND status IN ('dispatched', 'running')
+  AND status IN ('dispatched', 'preparing', 'running')
 GROUP BY worker_id;
 
 -- name: ListOverdueAssignedTasks :many
@@ -624,21 +625,22 @@ GROUP BY worker_id;
 -- is READ-ONLY: the watchdog writes through UpdateTaskStatus, so this slice adds
 -- no new writer of tasks.status and no new status partition on a write path.
 --
--- THE PARTITION IS ('dispatched','running'), i.e. "currently assigned" - the
--- same set GetActiveTasksForWorker, CountActiveTasksByAllWorkers,
+-- THE PARTITION IS ('dispatched','preparing','running'), i.e. "currently
+-- assigned" - the same set GetActiveTasksForWorker, CountActiveTasksByAllWorkers,
 -- ListGraceCandidates, RequeueWorkerTasks(IfEpoch) and idx_tasks_worker_active
 -- already use. It is deliberately NOT `status = 'running'`: a task spends the
--- whole workspace sync as `dispatched` (handleTaskStatus has no case for
--- TASK_STATUS_PREPARING, so the row does not move), and a stale-epoch reconcile
--- can strand a `dispatched` row whose worker was told to abandon it. Keying on
--- `running` would miss both.
+-- whole workspace sync in `preparing`, and a stale-epoch reconcile can strand a
+-- `dispatched` row whose worker was told to abandon it. Keying on `running`
+-- would miss both.
 --
 -- READ THIS ALLOW-LIST BACKWARDS, exactly like AppendTaskLog's first arm and
 -- unlike every other status predicate in this file. A new NON-TERMINAL status
 -- omitted here is NEVER SWEPT, which silently reopens the unbounded-assignment
 -- hole this statement exists to close, for that status - no error, no log line.
--- `preparing` is the live candidate. A new TERMINAL status must stay OUT.
--- TestTasksStatusVocabularyIsExactly names this site.
+-- A new TERMINAL status must stay OUT.
+-- TestTasksStatusVocabularyIsExactly names this site, and
+-- TestListOverdueAssignedTasks_AbsoluteArmSweepsAPreparingTask pins that a task
+-- in the state a workspace sync holds is still bounded by the absolute arm.
 --
 -- worker_id IS NOT NULL is not decoration. UpdateTaskStatus's worker predicate is
 -- a plain `=`, so a row with a NULL worker_id can never be written by it;
@@ -686,7 +688,7 @@ GROUP BY worker_id;
 -- which is what the ORDER BY is for. The caller logs when a sweep comes back
 -- full, so a truncated sweep is never mistaken for a complete one.
 SELECT * FROM tasks
-WHERE status IN ('dispatched', 'running')
+WHERE status IN ('dispatched', 'preparing', 'running')
   AND worker_id IS NOT NULL
   AND (
         ( sqlc.arg(absolute_enabled)::bool
@@ -771,7 +773,7 @@ SET status = 'failed',
     assigned_at = NULL,
     finished_at = NOW(),
     assignment_epoch = assignment_epoch + 1
-WHERE job_id = $1 AND status IN ('pending', 'queued', 'running', 'dispatched');
+WHERE job_id = $1 AND status IN ('pending', 'queued', 'preparing', 'running', 'dispatched');
 
 -- name: RequeueWorkerTasks :many
 -- Re-queue dispatched/running tasks for a worker that has disconnected or is
@@ -785,7 +787,7 @@ SET status = 'pending',
     assigned_at = NULL,
     started_at = NULL,
     assignment_epoch = assignment_epoch + 1
-WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+WHERE worker_id = $1 AND status IN ('dispatched', 'preparing', 'running')
 RETURNING id;
 
 -- name: RequeueWorkerTasksIfEpoch :many
@@ -799,7 +801,7 @@ SET status = 'pending',
     assigned_at = NULL,
     started_at = NULL,
     assignment_epoch = assignment_epoch + 1
-WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+WHERE worker_id = $1 AND status IN ('dispatched', 'preparing', 'running')
   AND EXISTS (SELECT 1 FROM workers w WHERE w.id = $1 AND w.connection_epoch = $2)
 RETURNING id;
 
@@ -954,7 +956,8 @@ RETURNING t.id;
 -- response's attribution_cleared count.
 --
 -- tasks.worker_id is ON DELETE SET NULL for EVERY row, but RequeueWorkerTasks
--- rescues only ('dispatched','running'). This statement is the OTHER side of
+-- rescues only the currently-assigned partition, whose membership
+-- TestTasksStatusVocabularyIsExactly pins. This statement is the OTHER side of
 -- that partition among rows that actually carry a worker_id: a pending row never
 -- does (both RequeueWorkerTasks and RetryJobTasks null it), so the rows that
 -- silently lose attribution are exactly the terminal ones. worker_id is public
@@ -962,12 +965,12 @@ RETURNING t.id;
 -- not bookkeeping.
 --
 -- THE PREDICATE IS AN ALLOW-LIST ON THE TERMINAL SET, deliberately, and it is the
--- same set RecomputeJobStatus treats as terminal. The equivalent deny-list
--- (`status NOT IN ('pending','dispatched','running')`) counts the same rows today
--- and fails OPEN on the next status added - a new non-terminal status would be
--- reported as attribution destroyed while its rows were in fact requeued. This
--- fails closed by under-counting instead, and TestTasksStatusVocabularyIsExactly
--- names this site so the partition is revisited rather than desynchronized.
+-- same set RecomputeJobStatus treats as terminal. The equivalent deny-list on the
+-- currently-assigned partition fails OPEN on the next status added - a new
+-- non-terminal status would be reported as attribution destroyed while its rows
+-- were in fact requeued. This fails closed by under-counting instead, and
+-- TestTasksStatusVocabularyIsExactly names this site so the partition is
+-- revisited rather than desynchronized.
 SELECT COUNT(*) FROM tasks
 WHERE worker_id = $1 AND status IN ('done', 'failed', 'timed_out');
 
@@ -977,23 +980,23 @@ WHERE worker_id = $1 AND status IN ('done', 'failed', 'timed_out');
 -- READ THE ALLOW-LIST BACKWARDS. A new NON-TERMINAL status omitted here is
 -- invisible in the panel and uncounted by CountActiveTasksForWorker, so an
 -- operator sees an idle worker that is busy and a Slots KPI that under-reports
--- its load - no error, no log line. `preparing` is the live candidate. A new
--- TERMINAL status must stay OUT: a finished task holds no slot.
+-- its load - no error, no log line. A new TERMINAL status must stay OUT: a
+-- finished task holds no slot.
 -- TestTasksStatusVocabularyIsExactly names this statement, and
--- TestListActiveTasksForWorkerPage_ReturnsBothAssignedStatuses pins the positive
--- arm - halving this IN list must turn it RED.
+-- TestListActiveTasksForWorkerPage_ReturnsEveryAssignedStatus pins the positive
+-- arm - dropping any member of this IN list must turn it RED.
 --
 -- SELECT * so sqlc emits []store.Task and the handler calls toTaskResponse on a
 -- real row. The job name comes from GetJobNamesByIDs rather than a JOIN, so
 -- there is no hand-written store.Task copy to lose a column `tasks` gains.
 --
--- Ordered by assigned_at, not started_at: started_at is NULL on a dispatched
--- row and a task spends the whole workspace sync as `dispatched`, so ordering by
--- it would bury the rows this panel exists to show. assigned_at is nullable, so
--- the NULLS LAST branch stays.
+-- Ordered by assigned_at, not started_at: started_at stays NULL through both
+-- `dispatched` and `preparing`, and a task spends the whole workspace sync in
+-- the latter, so ordering by it would bury the rows this panel exists to show.
+-- assigned_at is nullable, so the NULLS LAST branch stays.
 SELECT * FROM tasks
 WHERE worker_id = sqlc.arg(worker_id)
-  AND status IN ('dispatched', 'running')
+  AND status IN ('dispatched', 'preparing', 'running')
   AND (
        NOT sqlc.arg(cursor_set)::bool
     OR (
@@ -1017,4 +1020,4 @@ LIMIT sqlc.arg(page_limit)::int + 1;
 -- filter and aggregates the whole table on every poll.
 SELECT COUNT(*) FROM tasks
 WHERE worker_id = sqlc.arg(worker_id)
-  AND status IN ('dispatched', 'running');
+  AND status IN ('dispatched', 'preparing', 'running');
