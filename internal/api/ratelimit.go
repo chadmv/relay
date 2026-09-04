@@ -91,14 +91,14 @@ func userRateLimitKey(u AuthUser) (string, bool) {
 // choose, since an IPv6 caller holds a whole /64 and clientIP keys per /128.
 // After authentication there is a principal, resolved
 // server-side from a token-hash lookup and not selectable by the caller at all.
-// On POST /v1/jobs it is also the unit the bounded cost belongs to: the task rows
-// and subprocess spawns are charged to the submitter's own jobs. That is NOT true
-// of the other two routes - an admin may retry another user's job or fire another
-// user's schedule, and CreateJobFromSpec charges the execution to the owner while
-// the bucket is charged to the admin - so the argument that carries all three is
-// the operational one. Keyed on the address, one office egress or load balancer
-// collapses a whole studio into a single bucket, while one user with a
-// workstation and a laptop gets two.
+// On a SELF-SCOPED route - one that takes every identifier from the context
+// principal - the principal charged is the principal the work is done to, so the
+// bucket is also the unit the bounded cost belongs to. Where one principal may
+// act on another's resource that does not hold: the bucket is charged to the
+// caller while the work is charged to the owner. So the argument that carries
+// every mount is the operational one. Keyed on the address, one office egress or
+// load balancer collapses a whole studio into a single bucket, while one user
+// with a workstation and a laptop gets two.
 //
 // IT MUST BE MOUNTED INSIDE THE AUTH CHAIN and outside any admin gate:
 // auth(userLimit(admin(h))). Inside admin, a non-admin's rejected probes are
