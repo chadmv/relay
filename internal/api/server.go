@@ -124,6 +124,18 @@ type Server struct {
 	PasswordChangeLimitN   int
 	PasswordChangeLimitWin time.Duration
 
+	// MaxSchedulesPerOwner bounds how many scheduled_jobs rows one owner may
+	// hold. Set by cmd/relay-server's buildHTTPServer from
+	// RELAY_MAX_SCHEDULES_PER_OWNER. A NAMED FIELD, never another positional
+	// argument to New, whose tail is already four same-typed arguments in a row
+	// with a measured green transpose across them.
+	//
+	// Read it through maxSchedulesPerOwner(), never directly: a non-positive
+	// value folds to DefaultMaxSchedulesPerOwner, so a deleted or crossed wiring
+	// assignment degrades to "the operator's number was ignored" instead of
+	// "every create is refused".
+	MaxSchedulesPerOwner int
+
 	// searchLimiterOnce guards ONE limiter per Server. Every limiter constructor
 	// in this package starts a gcLoop goroutine that is never stopped, so a
 	// second instance would be a second budget and a leaked goroutine.
@@ -341,6 +353,17 @@ func (s *Server) Handler() http.Handler {
 }
 
 // ─── JSON helpers ────────────────────────────────────────────────────────────
+
+// maxSchedulesPerOwner resolves the effective per-owner schedule cap. Unlike
+// Handler.autoEnrollWorkerCeiling, zero is NOT a real answer here and does not
+// disable the cap: there is no route by which an operator can turn this control
+// off, and parseScheduleCap folds 0 to the default before it ever arrives.
+func (s *Server) maxSchedulesPerOwner() int {
+	if s.MaxSchedulesPerOwner < 1 {
+		return DefaultMaxSchedulesPerOwner
+	}
+	return s.MaxSchedulesPerOwner
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
