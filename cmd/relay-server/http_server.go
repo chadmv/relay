@@ -50,6 +50,11 @@ type httpServerDeps struct {
 	passwordChangeLimitN   int
 	passwordChangeLimitWin time.Duration
 
+	// maxSchedulesPerOwner bounds how many scheduled_jobs rows one owner may
+	// hold. An exported FIELD on api.Server rather than another argument on
+	// api.New, for the same reason as searchLimitN above.
+	maxSchedulesPerOwner int
+
 	allowSelfRegister bool
 	metrics           *metrics.Store
 
@@ -180,6 +185,12 @@ type httpServerDeps struct {
 //     TestBuildHTTPServer_ThePasswordBucketIsWiredWithTheConfiguredLimit, which
 //     drives three real requests through this function's output at a ceiling of
 //     two and asserts 400, 400, 429.
+//     The MaxSchedulesPerOwner field is guarded the same way, through
+//     TestScheduleCap_TheThirdCreateIsRefusedAtACapOfTwo, which drives three real
+//     creates through this function's output at a cap of two against a real
+//     Postgres and asserts 201, 201, 409. It is in the INTEGRATION lane because
+//     the count and the lock are database statements; that lane is run by
+//     go-ci.yml's pg-integration job.
 //
 // THAT LAST CLAIM STOPS AT THIS FUNCTION'S OWN ASSIGNMENTS. The test supplies
 // jobSubmitLimitN itself, so it says nothing about what main puts in the
@@ -191,6 +202,9 @@ type httpServerDeps struct {
 // TestMain_PassesThePasswordChangeLimitItParsed until a guard general enough to
 // cover any env-to-field pair subsumes it -
 // docs/backlog/idea-2026-08-14-generalize-the-env-to-field-wiring-guard.md.
+// The maxSchedulesPerOwner literal is covered by
+// TestMain_PassesTheScheduleCapItParsed, on the same terms as the
+// passwordChangeLimit pair.
 func buildHTTPServer(d httpServerDeps) *http.Server {
 	s := api.New(d.pool, d.q, d.broker, d.registry, d.corsOrigins,
 		d.loginLimitN, d.loginLimitWin, d.registerLimitN, d.registerLimitWin)
@@ -203,6 +217,7 @@ func buildHTTPServer(d httpServerDeps) *http.Server {
 	s.SearchLimitWin = d.searchLimitWin
 	s.PasswordChangeLimitN = d.passwordChangeLimitN
 	s.PasswordChangeLimitWin = d.passwordChangeLimitWin
+	s.MaxSchedulesPerOwner = d.maxSchedulesPerOwner
 
 	// A nil source leaves its section ABSENT, which is the payload's own
 	// vocabulary for "this control is not wired on this replica". It is

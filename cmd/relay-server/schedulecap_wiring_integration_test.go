@@ -100,3 +100,54 @@ func TestScheduleCap_TheThirdCreateIsRefusedAtACapOfTwo(t *testing.T) {
 		`SELECT count(*) FROM scheduled_jobs WHERE owner_id = $1`, user.ID).Scan(&n))
 	require.Equal(t, int64(2), n, "a refused create must write nothing")
 }
+
+// TestScheduleCap_AnAdminIsRefusedExactlyAsANonAdminIs pins that there is no
+// admin exemption.
+//
+// THE ADMIN CASE RUNS FIRST, so an early-exit exemption
+// (`if u.IsAdmin { skip the check }`) cannot pass by never being reached: a
+// decoy placed after its target is read by neither the code nor the mutant.
+//
+// The refused request is in each arm for the same reason as the sibling test
+// above: two successes under a cap of two are also what an absent control
+// produces, so only the 409 distinguishes "the admin is subject to the cap"
+// from "nobody is".
+//
+// Both owners share one server and one cap, which is what makes this a
+// statement about the CHECK rather than about two independently configured
+// servers.
+func TestScheduleCap_AnAdminIsRefusedExactlyAsANonAdminIs(t *testing.T) {
+	pool, q := newPgdsnPoolAndQueries(t)
+	admin := createUserWithTestPassword(t, q, "Admin", "cap-admin@example.com", true)
+	plain := createUserWithTestPassword(t, q, "Plain", "cap-plain@example.com", false)
+	adminToken := createScheduleCapToken(t, q, admin.ID)
+	plainToken := createScheduleCapToken(t, q, plain.ID)
+
+	srv := buildHTTPServer(httpServerDeps{
+		addr:                 "127.0.0.1:0",
+		pool:                 pool,
+		q:                    q,
+		maxSchedulesPerOwner: 2,
+	})
+
+	for _, tc := range []struct {
+		who   string
+		token string
+	}{
+		{"admin", adminToken},
+		{"non-admin", plainToken},
+	} {
+		t.Run(tc.who, func(t *testing.T) {
+			for i := 1; i <= 2; i++ {
+				rec := postSchedule(t, srv, tc.token, fmt.Sprintf("%s-under-%d", tc.who, i))
+				require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+			}
+			over := postSchedule(t, srv, tc.token, tc.who+"-over")
+			require.Equal(t, http.StatusConflict, over.Code,
+				"%s must be refused at the cap. An exemption for admins would carve a hole in a "+
+					"control everyone else is subject to, for the population most likely to be "+
+					"running the automation that fills the table, and the boot sweep does not care "+
+					"whose rows they are. body: %s", tc.who, over.Body.String())
+		})
+	}
+}

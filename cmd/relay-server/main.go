@@ -239,6 +239,17 @@ func main() {
 		log.Fatalf("parse RELAY_PASSWORD_CHANGE_RATE_LIMIT: %v", err)
 	}
 
+	// Bound how many scheduled_jobs rows one owner may hold. Not fatal on a bad
+	// value: the rate-limit family above fatals because a zero there unarms a
+	// bucket silently, whereas parseScheduleCap always returns a usable positive
+	// number. See cmd/relay-server/schedulecap_config.go.
+	maxSchedulesPerOwner, scheduleCapWarning := parseScheduleCap(
+		"RELAY_MAX_SCHEDULES_PER_OWNER", os.Getenv("RELAY_MAX_SCHEDULES_PER_OWNER"))
+	if scheduleCapWarning != "" {
+		log.Printf("WARNING: %s", scheduleCapWarning)
+	}
+	log.Print(scheduleCapLine(maxSchedulesPerOwner))
+
 	allowSelfRegister := false
 	if v := os.Getenv("RELAY_ALLOW_SELF_REGISTER"); v != "" {
 		allow, err := strconv.ParseBool(v)
@@ -329,6 +340,7 @@ func main() {
 		searchLimitWin:         searchWin,
 		passwordChangeLimitN:   passwordChangeN,
 		passwordChangeLimitWin: passwordChangeWin,
+		maxSchedulesPerOwner:   maxSchedulesPerOwner,
 		allowSelfRegister:      allowSelfRegister,
 		metrics:                metricsStore,
 		static:                 webui.Handler(),
