@@ -19,12 +19,6 @@ import (
 type Runner interface {
 	Run(ctx context.Context, cwd string, args []string, stdin io.Reader) ([]byte, error)
 	Stream(ctx context.Context, cwd string, args []string, onLine func(string)) error
-	// StreamWithStderr is Stream plus p4's stderr, returned even on a ZERO
-	// exit. Stream discards it there, which is right for a call whose only
-	// signal is its exit status and wrong for any caller that must tell
-	// "matched nothing" (p4 exits zero and says so on stderr) from "already up
-	// to date".
-	StreamWithStderr(ctx context.Context, cwd string, args []string, onLine func(string)) (string, error)
 }
 
 // p4CommandError is what a failed p4 invocation returns. It keeps the command
@@ -75,18 +69,13 @@ func (e *execRunner) Run(ctx context.Context, cwd string, args []string, stdin i
 }
 
 func (e *execRunner) Stream(ctx context.Context, cwd string, args []string, onLine func(string)) error {
-	_, err := e.StreamWithStderr(ctx, cwd, args, onLine)
-	return err
-}
-
-func (e *execRunner) StreamWithStderr(ctx context.Context, cwd string, args []string, onLine func(string)) (string, error) {
 	cmd := exec.CommandContext(ctx, e.binary, args...)
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", newP4CommandError(args, err, "")
+		return newP4CommandError(args, err, "")
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -94,7 +83,7 @@ func (e *execRunner) StreamWithStderr(ctx context.Context, cwd string, args []st
 		// Structured like every other failure out of this type, because
 		// classifyP4Error only classifies what came from a p4 invocation and this
 		// is the route a missing binary takes on the sync path.
-		return stderr.String(), newP4CommandError(args, err, "")
+		return newP4CommandError(args, err, "")
 	}
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -105,7 +94,7 @@ func (e *execRunner) StreamWithStderr(ctx context.Context, cwd string, args []st
 	// hang rather than a wrong count. StdoutPipe's contract is that Wait must
 	// not run until every read from the pipe has completed; a scanner that
 	// stopped on an error has not reached EOF, so p4 blocks writing into a full
-	// pipe, Wait blocks on p4, and this never returns - while Prepare holds
+	// pipe, Wait blocks on p4, and Stream never returns - while Prepare holds
 	// the workspace handle and nothing on this path carries a deadline.
 	// cmd.WaitDelay does not cover it: WaitDelay bounds a cancelled context and
 	// an exited-but-unclosed child, and here the context is live and the child
@@ -121,12 +110,12 @@ func (e *execRunner) StreamWithStderr(ctx context.Context, cwd string, args []st
 	// built from those lines - so the truncation is the more specific fact.
 	// TestExecRunner_AStdoutScanFailureOutranksANonZeroExitStatus.
 	if scanErr != nil {
-		return stderr.String(), newP4CommandError(args, scanErr, stderr.String())
+		return newP4CommandError(args, scanErr, stderr.String())
 	}
 	if waitErr != nil {
-		return stderr.String(), newP4CommandError(args, waitErr, stderr.String())
+		return newP4CommandError(args, waitErr, stderr.String())
 	}
-	return stderr.String(), nil
+	return nil
 }
 
 // Client wraps p4 CLI invocations.
@@ -214,21 +203,42 @@ func (c *Client) SyncStream(ctx context.Context, cwd, client string, specs []str
 	return c.r.Stream(ctx, cwd, args, onLine)
 }
 
+// PathHasFiles reports whether spec resolves to at least one file, via
+// `p4 -c <client> files -m1 <spec>`.
+//
+// IT IS A POSITIVE ASSERTION, NOT A PHRASE MATCH. p4 exits ZERO whether a
+// filespec matched or not and writes each of its several nothing-matched
+// wordings to stderr, so the reading that does not go stale on the next wording
+// is whether a matching line came back on STDOUT. testdata/p4-files holds the
+// captured artifacts, and TestPathHasFiles_ReadsTheCapturedArtifacts is the
+// guard.
+//
+// -m1 bounds the answer to one line, so the probe costs the same against a
+// subtree of ten files and one of ten million.
+//
+// It takes no cwd, for ResolveHead's reason: a subprocess cwd on a workspace
+// exposes p4 to any .p4config a previous task's build script wrote there.
+func (c *Client) PathHasFiles(ctx context.Context, client, spec string) (bool, error) {
+	out, err := c.r.Run(ctx, "", []string{"-c", client, "files", "-m1", spec}, nil)
+	if err != nil {
+		return false, err
+	}
+	return len(bytes.TrimSpace(out)) > 0, nil
+}
+
 // SyncPreempt runs `p4 -c <client> sync -k <spec>` from cwd, marking every file
 // under spec as already-have at that revision so the following real sync never
 // transfers it.
 //
 // It STREAMS stdout, for the reason SyncStream does - the excluded subtree can
-// be millions of lines - and it RETURNS stderr even on a zero exit, which is
-// what separates it from SyncStream: p4 exits ZERO when a filespec matches
-// nothing and reports it on stderr only, so a preempt that silently did nothing
-// is otherwise indistinguishable from one that worked. The caller reads the
-// text with preemptReportedNoSuchFiles.
+// be millions of lines. It cannot itself tell a preempt that did nothing from
+// one that worked, because p4 exits zero either way; PathHasFiles is the
+// question the caller asks first.
 //
 // NOT --parallel: the preempt transfers no file content, so there is nothing to
 // parallelise and the flag would only add threads to a metadata-only update.
-func (c *Client) SyncPreempt(ctx context.Context, cwd, client, spec string, onLine func(string)) (string, error) {
-	return c.r.StreamWithStderr(ctx, cwd, []string{"-c", client, "sync", "-k", spec}, onLine)
+func (c *Client) SyncPreempt(ctx context.Context, cwd, client, spec string, onLine func(string)) error {
+	return c.r.Stream(ctx, cwd, []string{"-c", client, "sync", "-k", spec}, onLine)
 }
 
 // CreatePendingCL creates an empty pending changelist on the named client

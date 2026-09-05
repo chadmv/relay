@@ -1,0 +1,4 @@
+$ p4 -c <client> files -m1 //<client>/heavy/...#head
+--- stdout ---
+--- stderr ---
+//<client>/heavy/...#head - file(s) not in client view.

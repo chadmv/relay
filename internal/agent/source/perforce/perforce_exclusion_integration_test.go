@@ -3,8 +3,11 @@
 package perforce
 
 import (
+	"bytes"
 	"context"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +16,13 @@ import (
 	"github.com/stretchr/testify/require"
 	relayv1 "relay/internal/proto/relayv1"
 )
+
+// recaptureEnv is the explicit opt-in to REWRITE the committed artifacts.
+// Without it this lane compares and FAILS on a mismatch, which is the only way
+// the capture can detect a p4 that changed its wording: a test that rewrites its
+// own fixture absorbs the change instead, and the unit test then passes against
+// text nobody read.
+const recaptureEnv = "RELAY_RECAPTURE_P4_FILES"
 
 // p4dEnv points the process at the fixture container and neutralises host P4
 // configuration, as every other test in this lane does.
@@ -40,7 +50,12 @@ func p4dEnv(t *testing.T) p4dHandle {
 // It cannot move to the default lane at all: the property under test is what
 // REAL p4 writes and which exit status it pairs that text with. A fake runner
 // echoes whatever it is told.
-func TestPerforce_E2E_SyncKReportsNoSuchFilesOnStderrAndExitsZero(t *testing.T) {
+//
+// THE FOUR READINGS ARE THE POINT. p4 exits ZERO for every one of them and
+// separates them only by which stream it writes to; the three failing ones are
+// three different wordings of a single condition, which is why PathHasFiles
+// asserts POSITIVELY on stdout rather than matching any of them.
+func TestPerforce_E2E_PathHasFilesReadingsAreCaptured(t *testing.T) {
 	p4dEnv(t)
 
 	root := t.TempDir()
@@ -60,51 +75,99 @@ func TestPerforce_E2E_SyncKReportsNoSuchFilesOnStderrAndExitsZero(t *testing.T) 
 	defer func() { _ = h.Finalize(ctx) }()
 
 	client := h.Env()["P4CLIENT"]
-	wsRoot := h.WorkingDir()
 	c := NewClient()
 
-	capture := func(name, filespec string) string {
+	// A client on the VIRTUAL stream, whose view remaps every path under sub/.
+	// It is the only way to reach "file(s) not in client view" here, and that
+	// reading is not decoration: it is what the second of the two routes the
+	// refusal exists for actually produces.
+	virtClient := "relay_ci_capture_virt"
+	require.NoError(t, c.CreateStreamClient(ctx, virtClient, t.TempDir(), "//test/virt", "", false))
+	defer func() { _ = c.DeleteClient(ctx, virtClient) }()
+
+	capture := func(name, cl, filespec string) {
 		t.Helper()
-		var lines []string
-		stderr, err := c.SyncPreempt(ctx, wsRoot, client, filespec, func(l string) { lines = append(lines, l) })
-		require.NoError(t, err, "p4 sync -k must not fail for %s", filespec)
-		body := "$ p4 -c <client> sync -k " + filespec + "\n" +
-			"--- stdout ---" + "\n" + strings.Join(lines, "\n") + "\n" +
-			"--- stderr ---" + "\n" + stderr + "\n"
-		require.NoError(t, os.WriteFile(filepath.Join("testdata", "p4-sync-k", name), []byte(body), 0o644))
-		t.Logf("captured %s:%s%s", name, "\n", body)
-		return body
+		stdout, stderr := rawP4Files(t, ctx, cl, filespec)
+		body := "$ p4 -c <client> files -m1 " + redactP4(filespec, cl) + "\n" +
+			"--- stdout ---\n" + redactP4(stdout, cl) +
+			"--- stderr ---\n" + redactP4(stderr, cl)
+		path := filepath.Join("testdata", "p4-files", name)
+		if os.Getenv(recaptureEnv) != "" {
+			require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+			t.Logf("recaptured %s:\n%s", name, body)
+			return
+		}
+		want, err := os.ReadFile(path)
+		require.NoError(t, err, "missing artifact; regenerate with %s=1", recaptureEnv)
+		require.Equal(t, string(want), body,
+			"p4 no longer produces the captured output for %s. PathHasFiles is written "+
+				"against these artifacts; read the diff before regenerating with %s=1",
+			name, recaptureEnv)
 	}
 
-	// Prepare has already synced the whole stream, so the have-list ALREADY
-	// covers heavy/ at #head. Capturing "marked" here without this line
-	// produces a file byte-identical to "uptodate", and the two readings the
-	// parser has to keep apart would then be pinned by one artifact wearing two
-	// names. #none clears the have-list for that subtree so the next call is a
-	// real have-marking with per-file output.
-	_, err = c.SyncPreempt(ctx, wsRoot, client, "//"+client+"/heavy/...#none", func(string) {})
+	capture("exists.txt", client, "//"+client+"/heavy/...#head")
+	capture("nosuchfile.txt", client, "//"+client+"/does-not-exist/...#head")
+	capture("nofilesatchangelist.txt", client, "//"+client+"/heavy/...@2")
+	capture("notinclientview.txt", virtClient, "//"+virtClient+"/heavy/...#head")
+
+	// The predicate against the live server rather than against the artifacts:
+	// the unit test proves it reads the recorded text correctly, and this proves
+	// the recording is of the call the production code actually makes.
+	ok, err := c.PathHasFiles(ctx, client, "//"+client+"/heavy/...#head")
 	require.NoError(t, err)
+	require.True(t, ok, "a subtree that exists must resolve to at least one file")
+	for _, tc := range []struct{ cl, spec string }{
+		{client, "//" + client + "/does-not-exist/...#head"},
+		{client, "//" + client + "/heavy/...@2"},
+		{virtClient, "//" + virtClient + "/heavy/...#head"},
+	} {
+		ok, err := c.PathHasFiles(ctx, tc.cl, tc.spec)
+		require.NoError(t, err, "p4 exits ZERO for %s, so this must not surface as an error", tc.spec)
+		require.False(t, ok, "%s resolves to no file and must read as such", tc.spec)
+	}
+}
 
-	marked := capture("marked.txt", "//"+client+"/heavy/...#head")     // have-list cleared above
-	uptodate := capture("uptodate.txt", "//"+client+"/heavy/...#head") // already at that have-rev
-	nosuch := capture("nosuchfile.txt", "//"+client+"/does-not-exist/...#head")
+// rawP4Files runs the probe's exact argv and returns stdout and stderr
+// separately. It does not go through PathHasFiles or Runner: the artifact has to
+// record what p4 wrote, not what either of them made of it - and Runner.Run
+// discards stderr on the zero exit every one of these readings produces.
+func rawP4Files(t *testing.T, ctx context.Context, client, filespec string) (string, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "p4", "-c", client, "files", "-m1", filespec)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	// A non-zero exit is a fixture fault here, not a reading: p4 exits zero for
+	// all four, and that pairing is half of what the artifacts record.
+	require.NoError(t, cmd.Run(), "p4 files %s exited non-zero (stderr: %s)", filespec, stderr.String())
+	return stdout.String(), stderr.String()
+}
 
-	// The three artifacts must be three readings, not two. A capture order that
-	// let "marked" and "uptodate" coincide would leave the predicate's
-	// discriminating input untested while every assertion below still passed.
-	require.NotEqual(t, marked, uptodate,
-		"a real have-marking and an already-marked no-op must be distinguishable captures")
+// redactP4 removes what would make an artifact machine-specific: the generated
+// client name, which carries the agent hostname; the home and temp directories,
+// which appear in any p4 message naming a local path; and the line terminator,
+// because p4.exe writes CRLF and p4 on Linux writes LF. The terminator is the
+// one normalisation that is safe here - the artifact exists to pin p4 WORDING,
+// and leaving it in would make every capture fail on the other platform.
+func redactP4(s, client string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, client, "<client>")
+	for _, dir := range []string{osUserHome(), os.TempDir()} {
+		if dir == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, dir, "<dir>")
+		s = strings.ReplaceAll(s, strings.ReplaceAll(dir, `\`, `/`), "<dir>")
+	}
+	return s
+}
 
-	// The two behaviours the parser depends on, asserted rather than described.
-	// TEXT, not exit status: p4 exits ZERO for all three
-	// (bug-2026-09-04-p4-sync-reports-not-in-client-view-and-exits-zero), which is
-	// the whole reason SyncPreempt returns stderr at all.
-	require.Contains(t, strings.ToLower(nosuch), "no such file",
-		"a filespec that matched nothing must be distinguishable, and only its text distinguishes it")
-	require.NotContains(t, strings.ToLower(uptodate), "no such file",
-		"an already-excluded subtree on a warm workspace must not read as a typo; "+
-			"zero per-file lines is success here, not emptiness")
-	require.NotContains(t, strings.ToLower(marked), "no such file")
+func osUserHome() string {
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return h
 }
 
 // THE ORDER IS LOAD-BEARING: the EXCLUDING task runs FIRST.
@@ -120,8 +183,8 @@ func TestPerforce_E2E_SyncKReportsNoSuchFilesOnStderrAndExitsZero(t *testing.T) 
 // bare stream. Task B then shares Task A's workspace, the preempted files are
 // never fetched, and B's read of heavy/asset.txt goes RED.
 //
-// Same CI note as TestPerforce_E2E_SyncKReportsNoSuchFilesOnStderrAndExitsZero
-// above: nothing in .github/workflows provides p4d or the p4 client, so this is
+// Same CI note as TestPerforce_E2E_PathHasFilesReadingsAreCaptured above:
+// nothing in .github/workflows provides p4d or the p4 client, so this is
 // human-run until a workflow job builds testdata/p4d, installs the Perforce CLI
 // and is added to a Makefile target's package list. It cannot move to the
 // default lane at all - a fake runner cannot say whether a file is on disk.
@@ -191,4 +254,48 @@ func TestPerforce_E2E_AnExcludingTaskDoesNotStripFilesFromAnUnexcludingPeer(t *t
 	}
 	require.Len(t, keys, 2, "the registry holds two entries with distinct source keys")
 	require.True(t, keys["//test/main"] && keys[invA.SourceKey])
+}
+
+// THE EXCLUSION IS INERT AND THE TASK MUST NOT REPORT SUCCESS. //test/virt's
+// view remaps everything under sub/, so //<client>/heavy/... addresses nothing -
+// the second of the two routes the refusal exists for, and the one whose wording
+// ("file(s) not in client view.") a single-phrase predicate does not match.
+// Without the refusal p4 exits zero, the whole subtree transfers, and the task
+// is green. The default-lane guard cannot reach this: only a real p4 decides
+// what a remapped view resolves.
+//
+// Same CI note as the two tests above.
+func TestPerforce_E2E_AnExclusionUnderARemappingStreamFailsThePrepare(t *testing.T) {
+	p4dEnv(t)
+
+	root := t.TempDir()
+	prov := New(Config{Root: root, Hostname: "ci"})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+		Perforce: &relayv1.PerforceSource{
+			Stream: "//test/virt",
+			Sync: []*relayv1.SyncEntry{
+				{Path: "//test/virt/...", Rev: "#head"},
+				{Path: "//test/virt/heavy/...", Exclude: true},
+			},
+		},
+	}}
+
+	_, err := prov.Prepare(ctx, "task-remap", spec, func(s string) { t.Logf("prepare: %s", s) })
+	require.Error(t, err, "an exclusion that addresses nothing must fail the prepare")
+	require.ErrorContains(t, err, "//test/virt/heavy/...")
+
+	// Nothing may have been transferred: the refusal exists to stop the excluded
+	// subtree arriving in full, so a green require.Error over a full workspace
+	// would be the defect wearing the fix's name.
+	var found []string
+	require.NoError(t, filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && d.Name() == "asset.txt" {
+			found = append(found, p)
+		}
+		return nil
+	}))
+	require.Empty(t, found, "the refused prepare must not have synced the stream")
 }

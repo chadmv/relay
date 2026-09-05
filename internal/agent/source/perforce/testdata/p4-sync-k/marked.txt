@@ -1,5 +1,0 @@
-$ p4 -c <client> sync -k //relay_ci_pwzap4/heavy/...#head
---- stdout ---
-//test/main/heavy/asset.txt#1 - added as C:\Users\chadv\AppData\Local\Temp\TestPerforce_E2E_SyncKReportsNoSuchFilesOnStderrAndExitsZero4132800598\001\pwzap4\heavy\asset.txt
---- stderr ---
-

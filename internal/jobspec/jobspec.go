@@ -314,6 +314,15 @@ const maxCommandsPerJob = 25000
 // identically to every bound in this file.
 const maxSyncExclusions = 16
 
+func hasControlByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 {
+			return true
+		}
+	}
+	return false
+}
+
 // Validate applies the same checks as POST /v1/jobs and normalizes each
 // task's command form: a legacy single Command is rewritten into a one-element
 // Commands and Command is cleared. Setting both Command and Commands is
@@ -535,6 +544,9 @@ func validateSourceSpec(s *SourceSpec) error {
 	if !strings.HasPrefix(s.Stream, "//") {
 		return errors.New("stream must start with //")
 	}
+	if hasControlByte(s.Stream) {
+		return errors.New("stream must not contain control characters")
+	}
 	if len(s.Sync) == 0 {
 		return errors.New("source.sync must have at least one sync entry")
 	}
@@ -542,6 +554,16 @@ func validateSourceSpec(s *SourceSpec) error {
 	for i, e := range s.Sync {
 		if !strings.HasPrefix(e.Path, "//") {
 			return fmt.Errorf("sync[%d].path must start with //", i)
+		}
+		// The prefix and containment rules constrain where a path STARTS and
+		// what it sits under; nothing else looks at its interior. Two consumers
+		// need this one to: perforce.SourceKey separates the exclusion set with
+		// a NUL, so two different sets could canonicalise to one workspace key
+		// and share a workspace; and Postgres refuses \u0000 inside jsonb, so a
+		// path carrying one turns a job submission into a 500 rather than this
+		// 400. A depot path has no legitimate use for a byte below 0x20.
+		if hasControlByte(e.Path) {
+			return fmt.Errorf("sync[%d].path must not contain control characters", i)
 		}
 		if e.Path != s.Stream &&
 			e.Path != s.Stream+"/..." &&

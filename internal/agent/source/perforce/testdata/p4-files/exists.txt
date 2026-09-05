@@ -1,0 +1,4 @@
+$ p4 -c <client> files -m1 //<client>/heavy/...#head
+--- stdout ---
+//test/main/heavy/asset.txt#1 - add change 4 (text)
+--- stderr ---

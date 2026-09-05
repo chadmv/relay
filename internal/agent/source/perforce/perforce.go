@@ -508,25 +508,48 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		progress(fmt.Sprintf("[sync] excluding: %d path(s)", len(preempts)))
 		for _, pe := range preempts {
 			progress(fmt.Sprintf("[sync] exclude %q", pe.depotPath))
-			sp := &syncProgress{}
-			stderr, err := p.cfg.Client.SyncPreempt(ctx, wsRoot, clientName, pe.clientSpec, sp.onLine)
+			// AN EXCLUSION THAT RESOLVES TO NO FILE FAILS THE PREPARE, and the
+			// question is asked POSITIVELY, ahead of the preempt. p4 exits ZERO
+			// on a filespec that matched nothing and reports it on stderr in
+			// several wordings, so a silently inert exclusion is otherwise
+			// indistinguishable from a working one and the operator reads the
+			// log after the volume is full. Two live routes reach it: a typo,
+			// and an exclusion under a stream whose view renames a subtree,
+			// where toClientPath emits a client path that resolves to nothing -
+			// and that second one produces "file(s) not in client view", which
+			// is why the reading cannot be one phrase.
+			// TestProvider_AnExclusionThatResolvesToNothingFailsThePrepare_NotInClientView.
+			//
+			// Each of the three refusals below RELEASES FIRST: the handle is
+			// held from ws.Acquire, Workspace.Acquire has no timeout and
+			// EvictWorkspace refuses while holders exist, so a leaked hold
+			// wedges this workspace for the life of the agent - and a typo'd
+			// exclusion, the input one of these branches exists for, would do
+			// it on first use.
+			// TestProvider_APreemptFailureReleasesTheWorkspace.
+			ok, err := p.cfg.Client.PathHasFiles(ctx, clientName, pe.clientSpec)
 			if err != nil {
 				handle.Release()
 				return nil, classifyP4Error(fmt.Errorf("exclude %s: %w", pe.depotPath, err))
 			}
-			// A PREEMPT THAT MATCHED NOTHING FAILS THE PREPARE. p4 exits ZERO
-			// on a filespec that matches nothing, so a silent preempt is
-			// indistinguishable from a working one and the operator reads the
-			// log after the volume is full. Two live routes reach it: a typo,
-			// and an exclusion under a stream whose view renames a subtree,
-			// where toClientPath emits a client path that resolves to nothing.
-			// The cause travels on the error and is NOT repeated on a progress
-			// line, as the sync-failure branch below documents.
-			if preemptReportedNoSuchFiles(stderr) {
+			if !ok {
+				// The cause travels on the error and is NOT repeated on a
+				// progress line, as the sync-failure branch below documents.
 				handle.Release()
-				return nil, fmt.Errorf("exclude %s: p4 reports no such file(s) under that path; "+
-					"the exclusion would do nothing. Check the path, and note that a stream whose "+
-					"view renames a subtree does not address that subtree by its depot path", pe.depotPath)
+				return nil, fmt.Errorf("exclude %s: p4 resolves no file under that path at the "+
+					"revision of the include that covers it; the exclusion would do nothing. Check "+
+					"the path, and note that a stream whose view renames a subtree does not address "+
+					"that subtree by its depot path", pe.depotPath)
+			}
+			// The per-file lines are counted and dropped, as they are for the
+			// real sync, so a preempt over a million-file subtree cannot reach
+			// task_logs. The count is not reported: no bytes moved, so it would
+			// only compete with the sync summary. Nor does this call heartbeat,
+			// so a preempt over a large subtree emits nothing while it runs.
+			sp := &syncProgress{}
+			if err := p.cfg.Client.SyncPreempt(ctx, wsRoot, clientName, pe.clientSpec, sp.onLine); err != nil {
+				handle.Release()
+				return nil, classifyP4Error(fmt.Errorf("exclude %s: %w", pe.depotPath, err))
 			}
 		}
 	}

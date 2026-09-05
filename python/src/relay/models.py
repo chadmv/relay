@@ -123,7 +123,15 @@ _CLIENT_TEMPLATE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 class Sync(BaseModel):
-    """A single depot path + revision to sync, or a path to leave out."""
+    """A single depot path + revision to sync, or a path to leave out.
+
+    The rules checked here are the ones an entry can answer alone: a path is a
+    depot path, and an excluded entry carries no revision while an included one
+    carries a recognised one. Every rule that needs the entry's SIBLINGS - that
+    it sits under the stream, that exactly one included path covers it, that it
+    does not swallow an include, and how many exclusions one spec may carry -
+    belongs to the server, which refuses the same spec on submission.
+    """
 
     model_config = ConfigDict(extra="forbid")
 

@@ -64,9 +64,8 @@ func TestSourceKey_DifferentExclusionSetsAreDifferentWorkspaces(t *testing.T) {
 // CONCATENATION of the other set's two paths, so the two canonical forms differ
 // only by where the boundary falls. Drop the terminator between entries and the
 // two sets hash to one value, which puts two different exclusion sets into one
-// workspace. The pair is synthetic - neither would survive
-// validateSourceSpec's containment rule - because the property under test is
-// the key function's own encoding, and this is the input that isolates it.
+// workspace. The pair is synthetic because the property under test is the key
+// function's own encoding, and this is the input that isolates it.
 func TestSourceKey_ASetBoundaryIsPartOfTheEncoding(t *testing.T) {
 	two := SourceKey(pfWith(
 		&relayv1.SyncEntry{Path: "//s/x/a/...", Exclude: true},
@@ -83,10 +82,11 @@ func TestSourceKey_ASetBoundaryIsPartOfTheEncoding(t *testing.T) {
 // on the registration-time bulk ingest bounds its length - an over-long value
 // fails the whole inventory transaction rather than one row
 // (idea-2026-09-04-worker-workspaces-source-key-is-unbounded-in-a-primary-key).
-// This design stays clear of that by construction, and "by construction" is a
-// property of the function below, not of the schema: a canonicalisation that
-// inlined the paths would reintroduce it silently. Sixteen maximum-length depot
-// paths would exceed Postgres's btree index-row limit; twenty bytes cannot.
+// That hazard is NOT closed here: the key still embeds the stream verbatim, and
+// the stream is unbounded. What this pins is the DELTA - exclusions add twenty
+// bytes and no more, however many there are and however long they are, where a
+// canonicalisation that inlined the paths would let sixteen maximum-length depot
+// paths exceed Postgres's btree index-row limit.
 func TestSourceKey_IsBoundedAtTwentyBytesOverTheStream(t *testing.T) {
 	long := make([]*relayv1.SyncEntry, 0, 16)
 	for i := 0; i < 16; i++ {
@@ -96,4 +96,23 @@ func TestSourceKey_IsBoundedAtTwentyBytesOverTheStream(t *testing.T) {
 		})
 	}
 	require.Len(t, SourceKey(pfWith(long...)), len("//s/x")+20)
+}
+
+// THE TRAILING "/..." IS PART OF THE STRING, and the two spellings must NOT
+// share a workspace even though jobspec.DepotPathCovers reads them as one
+// subtree. The preempt filespec is the literal string: "//c/Content@N" marks the
+// single file named Content, "//c/Content/...@N" marks the subtree. Fold them
+// onto one key and the broader task's preempt strips files the narrower task
+// asked for, inside a workspace they now share.
+func TestSourceKey_ATrailingEllipsisIsPartOfTheString(t *testing.T) {
+	file := SourceKey(pfWith(
+		&relayv1.SyncEntry{Path: "//s/x/...", Rev: "#head"},
+		&relayv1.SyncEntry{Path: "//s/x/Content", Exclude: true},
+	))
+	tree := SourceKey(pfWith(
+		&relayv1.SyncEntry{Path: "//s/x/...", Rev: "#head"},
+		&relayv1.SyncEntry{Path: "//s/x/Content/...", Exclude: true},
+	))
+	require.NotEqual(t, file, tree,
+		"two exclusions that preempt different filespecs must not share a workspace")
 }

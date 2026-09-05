@@ -29,10 +29,6 @@ type fakeRunner struct {
 	block     map[string]bool
 	streamOut map[string]string
 	streamErr map[string]error
-	// streamStderr is what StreamWithStderr returns for a key, INDEPENDENT of
-	// whether Stream errored: p4 exits zero and still writes "no such file(s)"
-	// there, and that pairing is the whole reason SyncPreempt exists.
-	streamStderr map[string]string
 
 	streamBlock map[string]<-chan struct{}
 
@@ -57,8 +53,6 @@ func newFakeP4Fixture(t tHelper) *fakeRunner {
 		block:     map[string]bool{},
 		streamOut: map[string]string{},
 		streamErr: map[string]error{},
-
-		streamStderr: map[string]string{},
 
 		streamBlock: map[string]<-chan struct{}{},
 	}
@@ -97,13 +91,6 @@ func (f *fakeRunner) setStreamErr(key string, err error) {
 // TestProvider_PrepareDoesNotReturnUntilTheSyncGoroutineHasFinished.
 func (f *fakeRunner) setStreamBlock(key string, release <-chan struct{}) {
 	f.streamBlock[key] = release
-}
-
-func (f *fakeRunner) setStreamStderr(key, out string) { f.streamStderr[key] = out }
-
-func (f *fakeRunner) StreamWithStderr(ctx context.Context, cwd string, args []string, onLine func(string)) (string, error) {
-	err := f.Stream(ctx, cwd, args, onLine)
-	return f.streamStderr[strings.Join(args, " ")], err
 }
 
 func (f *fakeRunner) argHistory() [][]string {

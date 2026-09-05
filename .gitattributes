@@ -1,4 +1,5 @@
 *.sh text eol=lf
-# Captured p4 output. These are recordings, not source: normalising their
-# line endings would rewrite the bytes the capture exists to preserve.
-internal/agent/source/perforce/testdata/p4-sync-k/*.txt -text
+# Captured p4 output. The capture normalises the line terminator itself (p4.exe
+# writes CRLF, p4 on Linux writes LF), so these are committed and checked out as
+# LF on every platform or the comparison fails off Windows.
+internal/agent/source/perforce/testdata/p4-files/*.txt text eol=lf

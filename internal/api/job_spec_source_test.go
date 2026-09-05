@@ -40,6 +40,32 @@ func TestValidateJobSpec_Source_Perforce(t *testing.T) {
 		{"sync path not depot", func(s *JobSpec) {
 			s.Tasks[0].Source.Sync = []SyncEntry{{Path: "relative/path", Rev: "#head"}}
 		}, "must start with //"},
+		// The prefix and containment rules constrain where a path STARTS and
+		// what it is under; they say nothing about its interior bytes. A NUL
+		// there is the sharp case: perforce.SourceKey separates the exclusion
+		// set with one, so two different sets can canonicalise to a single
+		// workspace key, and Postgres refuses \u0000 inside jsonb, which turns
+		// a job submission into a 500 instead of a 400. Both are fixed by
+		// refusing the byte here.
+		{"stream carrying a NUL", func(s *JobSpec) {
+			s.Tasks[0].Source.Stream = "//streams/X/ma\x00in"
+			s.Tasks[0].Source.Sync = []SyncEntry{{Path: "//streams/X/ma\x00in/...", Rev: "#head"}}
+		}, "stream must not contain control characters"},
+		{"sync path carrying a NUL", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync[0].Path = "//streams/X/main/a\x00b/..."
+		}, "must not contain control characters"},
+		// A newline is the same class and the cheaper one to reach: it survives
+		// jsonb, so a stored spec carrying one would reach the agent's argv and
+		// its progress log.
+		{"sync path carrying a newline", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync[0].Path = "//streams/X/main/a\nb/..."
+		}, "must not contain control characters"},
+		{"excluded path carrying a NUL", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = []SyncEntry{
+				{Path: "//streams/X/main/...", Rev: "#head"},
+				{Path: "//streams/X/main/He\x00avy/...", Exclude: true},
+			}
+		}, "must not contain control characters"},
 		{"bad rev", func(s *JobSpec) {
 			s.Tasks[0].Source.Sync[0].Rev = "garbage"
 		}, "invalid rev"},

@@ -324,23 +324,34 @@ func TestClient_RunFailureBubbles(t *testing.T) {
 	require.ErrorContains(t, err, "P4PASSWD")
 }
 
-// SyncPreempt is the p4 call in this package whose CORRECTNESS depends on
-// stderr from a ZERO exit, which is what separates it from SyncStream. It must
-// also stream, not buffer: the excluded subtree can be millions of lines.
-func TestClient_SyncPreempt_ArgvAndStderr(t *testing.T) {
+// SyncPreempt must STREAM, not buffer: the excluded subtree can be millions of
+// lines, and -k is what makes those lines metadata rather than transfers.
+func TestClient_SyncPreempt_ArgvAndStreaming(t *testing.T) {
 	fr := newFakeP4Fixture(t)
 	fr.setStream("-c cl sync -k //cl/heavy/...@99", "//cl/heavy/a.ma#1 - added\n")
-	fr.setStreamStderr("-c cl sync -k //cl/heavy/...@99", "//cl/heavy/... - no such file(s).\n")
 
 	var lines []string
-	stderr, err := (&Client{r: fr}).SyncPreempt(
+	err := (&Client{r: fr}).SyncPreempt(
 		context.Background(), "/ws", "cl", "//cl/heavy/...@99",
 		func(l string) { lines = append(lines, l) })
 
-	require.NoError(t, err, "p4 exits ZERO here; the refusal is the caller's, from the text")
-	require.Equal(t, "//cl/heavy/... - no such file(s).\n", stderr,
-		"stderr must survive a zero exit or a typo'd exclusion is undetectable")
+	require.NoError(t, err)
 	require.Equal(t, []string{"//cl/heavy/a.ma#1 - added"}, lines,
 		"stdout must reach the callback, not a buffer")
 	require.Equal(t, []string{"-c", "cl", "sync", "-k", "//cl/heavy/...@99"}, fr.argHistory()[0])
+}
+
+// The probe's argv, and the cwd it must NOT take. ResolveHead's comment carries
+// the reason: a subprocess cwd on a workspace exposes p4 to any .p4config a
+// previous task's build script wrote into the workspace root.
+func TestClient_PathHasFiles_ArgvAndNoWorkspaceCwd(t *testing.T) {
+	fr := newFakeP4Fixture(t)
+	fr.set("-c cl files -m1 //cl/heavy/...@99", "//s/x/heavy/a.ma#1 - add change 99 (text)\n")
+
+	ok, err := (&Client{r: fr}).PathHasFiles(context.Background(), "cl", "//cl/heavy/...@99")
+
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, []string{"-c", "cl", "files", "-m1", "//cl/heavy/...@99"}, fr.argHistory()[0])
+	require.Equal(t, "", fr.calls[0].cwd)
 }

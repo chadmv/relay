@@ -27,6 +27,16 @@ import (
 // silently reusing a key for a different meaning. The 16-hex truncation is the
 // same shape BaselineHash uses, so an operator sees one form twice.
 //
+// IT HASHES THE LITERAL STRINGS, and must keep doing so even though
+// jobspec.DepotPathCovers reads "//s/x/C" and "//s/x/C/..." as one subtree. The
+// preempt's filespec IS the literal string: `sync -k //c/C@N` marks one file and
+// `sync -k //c/C/...@N` marks a subtree, so two specs the validator treats alike
+// exclude different things. Folding them onto one key would put both in one
+// workspace and let the broader preempt strip files the narrower task asked for
+// - the poisoning hazard this key exists to close. Over-partitioning costs a
+// workspace and the warm bias; TestSourceKey_ATrailingEllipsisIsPartOfTheString
+// is the guard.
+//
 // KEEP IT SHORT. TestSourceKey_IsBoundedAtTwentyBytesOverTheStream is the guard
 // and carries the reason.
 func SourceKey(p *relayv1.PerforceSource) string {
@@ -55,8 +65,6 @@ func SourceKey(p *relayv1.PerforceSource) string {
 		// Without it two different exclusion sets whose concatenations coincide
 		// hash alike and share one workspace;
 		// TestSourceKey_ASetBoundaryIsPartOfTheEncoding is the discriminator.
-		// No path reaching here can contain it: validateSourceSpec requires a
-		// leading "//" and every path is text.
 		h.Write([]byte{0})
 	}
 	return "x1|" + hex.EncodeToString(h.Sum(nil))[:16] + "|" + p.GetStream()
