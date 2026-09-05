@@ -26,13 +26,26 @@ import (
 
 // startRelayForMCP spins up a Postgres testcontainer, runs migrations, creates the
 // api.Server wrapped in an httptest.Server, and seeds an admin and a non-admin user.
-// It returns the base URL, admin bearer token, non-admin bearer token, and a teardown func.
-func startRelayForMCP(t *testing.T) (baseURL, adminToken, userToken string, teardown func()) {
+// It returns the base URL, admin bearer token and non-admin bearer token.
+//
+// Every acquisition here arms its own release via t.Cleanup before the next
+// acquisition runs, so a seed that fails below (require.NoError can FailNow)
+// still releases everything acquired so far instead of leaking it - there is
+// no returned teardown func left to leak past. t.Cleanup unwinds LIFO, which
+// also gives the release its correct order relative to acquisition: httpSrv
+// (acquired last, and the only thing with live requests in flight) closes
+// first, then the pool it was built on, then - registered first by
+// pgdsn.NewIntegrationDSN above, so it runs last - the database itself (DROP
+// DATABASE, or container Terminate). Both httpSrv.Close and pool.Close go
+// through BoundedCleanup because neither takes a context to bound with; see
+// that function's own comment.
+func startRelayForMCP(t *testing.T) (baseURL, adminToken, userToken string) {
 	t.Helper()
 	dsn := pgdsn.NewIntegrationDSN(t)
 
 	pool, err := pgxpool.New(context.Background(), dsn)
 	require.NoError(t, err)
+	t.Cleanup(func() { pgdsn.BoundedCleanup(t, "mcp pgxpool.Close", pool.Close) })
 
 	q := store.New(pool)
 	broker := events.NewBroker()
@@ -40,18 +53,12 @@ func startRelayForMCP(t *testing.T) (baseURL, adminToken, userToken string, tear
 	apiSrv := api.New(pool, q, broker, registry, nil, 0, 0, 0, 0)
 
 	httpSrv := httptest.NewServer(apiSrv.Handler())
+	t.Cleanup(func() { pgdsn.BoundedCleanup(t, "mcp httpSrv.Close", httpSrv.Close) })
 
 	adminToken = seedAndLogin(t, httpSrv.URL, q, "admin@relay-mcp-test.com", "adminpassword1", true)
 	userToken = seedAndLogin(t, httpSrv.URL, q, "user@relay-mcp-test.com", "userpassword1", false)
 
-	// The database's own teardown (DROP DATABASE, or container Terminate) is
-	// already registered on t by pgdsn.NewIntegrationDSN above; this teardown
-	// owns only what it created itself.
-	teardown = func() {
-		httpSrv.Close()
-		pgdsn.BoundedCleanup(t, "mcp pgxpool.Close", pool.Close)
-	}
-	return httpSrv.URL, adminToken, userToken, teardown
+	return httpSrv.URL, adminToken, userToken
 }
 
 // seedAndLogin creates a user directly via the store using bcrypt.MinCost, then
@@ -87,8 +94,7 @@ func seedAndLogin(t *testing.T, baseURL string, q *store.Queries, email, passwor
 // TestIntegration_Whoami verifies that callWhoami returns the admin user identity
 // with is_admin == true.
 func TestIntegration_Whoami(t *testing.T) {
-	baseURL, adminToken, _, teardown := startRelayForMCP(t)
-	defer teardown()
+	baseURL, adminToken, _ := startRelayForMCP(t)
 
 	s, err := NewServer(baseURL, adminToken)
 	require.NoError(t, err)
@@ -105,8 +111,7 @@ func TestIntegration_Whoami(t *testing.T) {
 // (no worker, so the job stays pending), then calls get_task_logs. Verifies the
 // API surface works end-to-end without a worker agent.
 func TestIntegration_SubmitWaitLogs(t *testing.T) {
-	baseURL, adminToken, _, teardown := startRelayForMCP(t)
-	defer teardown()
+	baseURL, adminToken, _ := startRelayForMCP(t)
 
 	s, err := NewServer(baseURL, adminToken)
 	require.NoError(t, err)
@@ -169,8 +174,7 @@ func TestIntegration_SubmitWaitLogs(t *testing.T) {
 // TestIntegration_ListJobsPagination submits 3 jobs, lists with limit=2, verifies
 // next_cursor is non-empty, then fetches page 2 using the cursor.
 func TestIntegration_ListJobsPagination(t *testing.T) {
-	baseURL, adminToken, _, teardown := startRelayForMCP(t)
-	defer teardown()
+	baseURL, adminToken, _ := startRelayForMCP(t)
 
 	s, err := NewServer(baseURL, adminToken)
 	require.NoError(t, err)
@@ -207,8 +211,7 @@ func TestIntegration_ListJobsPagination(t *testing.T) {
 // TestIntegration_ForbiddenAsNonAdmin calls callListReservations with a non-admin
 // token and expects a "forbidden" ToolError.
 func TestIntegration_ForbiddenAsNonAdmin(t *testing.T) {
-	baseURL, _, userToken, teardown := startRelayForMCP(t)
-	defer teardown()
+	baseURL, _, userToken := startRelayForMCP(t)
 
 	s, err := NewServer(baseURL, userToken)
 	require.NoError(t, err)
@@ -221,8 +224,7 @@ func TestIntegration_ForbiddenAsNonAdmin(t *testing.T) {
 // TestIntegration_AuthExpired revokes the admin token via DELETE /v1/auth/token
 // and then verifies that callWhoami returns terr.Code == "auth_expired".
 func TestIntegration_AuthExpired(t *testing.T) {
-	baseURL, adminToken, _, teardown := startRelayForMCP(t)
-	defer teardown()
+	baseURL, adminToken, _ := startRelayForMCP(t)
 
 	// Revoke the token.
 	resp, err := doAuthRequest(t, "DELETE", baseURL+"/v1/auth/token", adminToken, nil)
@@ -244,8 +246,7 @@ func TestIntegration_AuthExpired(t *testing.T) {
 // TestIntegration_ScheduleRoundTrip creates a scheduled job, updates it (enabled=false),
 // deletes it, then confirms that get returns a "not_found" ToolError.
 func TestIntegration_ScheduleRoundTrip(t *testing.T) {
-	baseURL, adminToken, _, teardown := startRelayForMCP(t)
-	defer teardown()
+	baseURL, adminToken, _ := startRelayForMCP(t)
 
 	s, err := NewServer(baseURL, adminToken)
 	require.NoError(t, err)
@@ -289,8 +290,7 @@ func TestIntegration_ScheduleRoundTrip(t *testing.T) {
 // TestIntegration_NonAdminHidesReservations verifies a non-admin session does not
 // list relay_list_reservations against a real /v1/users/me.
 func TestIntegration_NonAdminHidesReservations(t *testing.T) {
-	baseURL, _, userToken, teardown := startRelayForMCP(t)
-	defer teardown()
+	baseURL, _, userToken := startRelayForMCP(t)
 
 	s, err := NewServer(baseURL, userToken)
 	require.NoError(t, err)
@@ -304,8 +304,7 @@ func TestIntegration_NonAdminHidesReservations(t *testing.T) {
 // TestIntegration_AdminListsAndCallsReservations verifies an admin session lists
 // relay_list_reservations and can call it against a real backend.
 func TestIntegration_AdminListsAndCallsReservations(t *testing.T) {
-	baseURL, adminToken, _, teardown := startRelayForMCP(t)
-	defer teardown()
+	baseURL, adminToken, _ := startRelayForMCP(t)
 
 	s, err := NewServer(baseURL, adminToken)
 	require.NoError(t, err)

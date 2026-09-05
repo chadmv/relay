@@ -24,7 +24,8 @@ make test-cli-integration
 # cmd/relay-server, internal/worker, internal/scheduler, internal/mcp, and
 # internal/testsupport/pgdsn's own database-touching self-test - plus
 # internal/agent, which needs no database at all and is here only because
-# this is the job that runs integration-tagged tests on an ubuntu runner.
+# this is one of three jobs that run integration-tagged tests on an ubuntu
+# runner, not because it needs the service.
 # Same two modes as test-cli-integration above. cmd/relay-server,
 # internal/worker, internal/scheduler and internal/mcp qualify because, like
 # internal/store and internal/schedrunner, they take their database from
@@ -67,8 +68,7 @@ go test ./internal/api/... -run TestRegister_HappyPath -v -timeout 30s
 
 # Run integration tests for one package
 go test -tags integration -p 1 ./internal/api/... -run TestRegister -v -timeout 120s
-# The whole internal/api integration package runs around 750s in container mode (measured,
-# a clean completed run - revising this comment's earlier "about 9.5 minutes" upward); a
+# The whole internal/api integration package runs around 750s in container mode; a
 # 600s timeout is inside its variance band and reports FAIL with no --- FAIL line beneath
 # it. Use -timeout 1800s.
 ```

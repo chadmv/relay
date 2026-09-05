@@ -11,15 +11,13 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// This file is one of the TWO DEFAULT-LANE SIBLINGS carrying what CI can check
-// about docs/backlog/bug-2026-08-23-unfireable-schedule-is-invisible.md. The
-// end-to-end proof is in
-// internal/api/scheduled_jobs_failure_visibility_integration_test.go and is
-// //go:build integration, and .github/workflows/go-ci.yml runs no tags, so it
-// never runs in CI. See that file's header for the full decision. The other
-// sibling is internal/schedrunner/failure_test.go.
+// This file is one of the two default-lane siblings covering
+// docs/backlog/bug-2026-08-23-unfireable-schedule-is-invisible.md. The
+// end-to-end proof, against a real TickOnce and a real HTTP server, is in
+// internal/api/scheduled_jobs_failure_visibility_integration_test.go. The
+// other sibling is internal/schedrunner/failure_test.go.
 //
-// WHAT THIS PINS IN CI, with no database: the wire contract. Field names,
+// WHAT THIS PINS, with no database: the wire contract. Field names,
 // absent-not-zero for a healthy schedule, present-with-values for a failing one,
 // and the arity relationship between the row and the response.
 //

@@ -126,7 +126,7 @@ jobs:
         run: make test-cli-integration
 
   pg-integration:
-    name: pg integration (store, schedrunner, relay-server, worker, scheduler, mcp, agent, pgdsn)
+    name: pg integration
     # Platform: linux. Compiles and runs the linux arm only.
     runs-on: ubuntu-latest
     # DELIBERATELY NOT 15, for the reason cli-integration's comment gives: the
@@ -134,13 +134,12 @@ jobs:
     # panic and a GitHub job kill indistinguishable in the log. 12 here
     # against the target's -timeout 600s means the two failures name
     # themselves - but -timeout 600s is PER TEST BINARY and this target names
-    # eight packages, grown from four when internal/worker, internal/scheduler,
-    # internal/mcp and internal/agent joined (internal/agent contributes zero
-    # database acquisitions - see test-pg-integration's own comment for why it
-    # is here at all), so 12 minutes is coupled to those packages running
-    # concurrently (no -p 1 in test-pg-integration): a change that serializes
-    # them (adding -p 1, or a CI runner with GOMAXPROCS=1) can multiply the
-    # worst case past this job's limit.
+    # eight packages (internal/agent contributes zero database acquisitions -
+    # see test-pg-integration's own comment for why it is here at all), so 12
+    # minutes is coupled to those packages running concurrently (no -p 1 in
+    # test-pg-integration): a change that serializes them (adding -p 1, or a
+    # CI runner with GOMAXPROCS=1) can multiply the worst case past this
+    # job's limit.
     timeout-minutes: 12
     services:
       # Same image, user, password and port as cli-integration's service, so
@@ -181,32 +180,27 @@ jobs:
       # carries no branch protection and no rulesets, so no check anywhere
       # blocks a merge - a red result reports and nothing more. Do not
       # describe this job, or any other, as a "merge gate".
-      - name: Postgres integration lanes (internal/store, internal/schedrunner, cmd/relay-server, internal/worker, internal/scheduler, internal/mcp, internal/agent, internal/testsupport/pgdsn)
+      - name: Postgres integration lanes (see the test-pg-integration target in Makefile for the package list)
         run: make test-pg-integration
 
   api-integration:
     name: api integration (internal/api)
     # Platform: linux. Compiles and runs the linux arm only.
     runs-on: ubuntu-latest
-    # ITS OWN JOB, not folded into pg-integration above: internal/api alone
-    # runs about 1.8x that job's combined package acquisition count, so
-    # putting it there would not fit pg-integration's own timeout argument, it
-    # would replace it with one nobody has measured for a package this size.
-    # Two jobs on separate runners also make the wall clock the max rather
-    # than the sum, which is the same reason cli-integration and
-    # pg-integration are already separate jobs rather than steps in one.
+    # ITS OWN JOB, not folded into pg-integration above: measured in
+    # shared-service mode, internal/api alone runs about 230s against
+    # pg-integration's about 113s wall clock, so putting it there would not
+    # fit pg-integration's own timeout argument, it would replace it with one
+    # sized for a package that dominates the lane. Two jobs on separate
+    # runners also make the wall clock the max rather than the sum, which is
+    # the same reason cli-integration and pg-integration are already separate
+    # jobs rather than steps in one.
     #
-    # timeout-minutes: 10, NOT equal to the target's own -timeout 1800s -
-    # THIS INVERSION IS DELIBERATE, READ BEFORE "FIXING" IT. In the other two
-    # jobs the Go timeout is BELOW the job timeout, so a Go panic and a
-    # GitHub kill name themselves independently. Here it is the other way
-    # round: make test-api-integration's -timeout 1800s is sized for
-    # container mode (a developer with Docker and no
-    # RELAY_TEST_DATABASE_URL), while this job runs in shared-service mode at
-    # roughly a third of that cost. The property that matters is that the two
-    # numbers are not EQUAL: in CI the job-level kill always wins and is
-    # therefore unambiguous, and locally the Go timeout is the correct one for
-    # the mode a human is in.
+    # timeout-minutes: 10, with the Go timeout held BELOW it via
+    # API_TEST_TIMEOUT below - the same ordering cli-integration's and
+    # pg-integration's comments already argue for: a Go panic prints a
+    # goroutine dump naming the hung test, and fires before GitHub's own kill
+    # would otherwise report a bare timeout with nothing underneath it.
     timeout-minutes: 10
     services:
       # Same image, user, password and port as cli-integration's and
@@ -230,6 +224,11 @@ jobs:
       # same harness the other two Postgres jobs use. 127.0.0.1, never
       # localhost, for the same reason cli-integration's env comment gives.
       RELAY_TEST_DATABASE_URL: postgres://relay:relay@127.0.0.1:5432/postgres?sslmode=disable
+      # Overrides the Makefile target's own 1800s default, which is sized for
+      # container mode. 480s is below this job's own timeout-minutes: 10
+      # (600s) and above the ~230s this package measures in shared-service
+      # mode, so a hang here prints a Go goroutine dump before GitHub's kill.
+      API_TEST_TIMEOUT: 480s
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6

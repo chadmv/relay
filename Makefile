@@ -62,11 +62,7 @@ test:
 
 # Run integration tests (requires Docker); -p 1 prevents parallel container conflicts on Windows.
 # The timeout is deliberately generous: every integration test spins up its own
-# real Postgres container, so internal/api alone runs around 750s (measured, a
-# clean completed run under -timeout 1800s - somewhat above CLAUDE.md's older
-# ~9.5 minute figure, itself derived from a killed 600s run's variance band
-# rather than a completion). An earlier version of this comment said
-# ~320-340s; that was stale for the package's size at the time it was written.
+# real Postgres container, so internal/api alone runs around 750s.
 #
 # Deliberately NOT -count=1: Go's test cache DOES key on env vars a test
 # actually reads via os.Getenv during that run (pgdsn.NewEmptyDSN reads
@@ -143,17 +139,17 @@ test-cli-integration:
 # rather than a built binary, and the subprocess it runs is the test binary
 # itself.
 #
-# ./internal/agent NEEDS NO DATABASE AT ALL - it is here because this is the
-# job that runs integration-tagged tests on an ubuntu runner, not because it
-# needs the service. Its two tagged files drive an in-process fake gRPC
-# coordinator and real subprocesses; neither touches Postgres. Do not "fix"
-# this by moving it to its own job over an apparent inconsistency.
+# ./internal/agent NEEDS NO DATABASE AT ALL - it is here because this is one
+# of three jobs that run integration-tagged tests on an ubuntu runner, not
+# because it needs the service. Its two tagged files drive an in-process fake
+# gRPC coordinator and real subprocesses; neither touches Postgres. Do not
+# "fix" this by moving it to its own job over an apparent inconsistency.
 #
 # THE PACKAGE PATH IS ./internal/agent, NEVER ./internal/agent/..., AND THAT
 # IS LOAD-BEARING. The /... form also matches internal/agent/source/perforce,
-# whose tests t.Skip when the p4 client or Docker is unreachable - both true
-# on a GitHub runner - so the wrong pattern makes this job report green having
-# silently run zero of that package's tests. Confirm with
+# whose tests t.Skip when the p4 client binary is missing - true on a GitHub
+# runner, which has no p4 install step - so the wrong pattern makes this job
+# report green having silently run zero of that package's tests. Confirm with
 # `go test -tags integration -list '.*' ./internal/agent` (no perforce test
 # names) before changing this line.
 #
@@ -172,22 +168,30 @@ test-pg-integration:
 	go test -tags integration -count=1 ./internal/store/... ./internal/schedrunner/... ./internal/testsupport/... ./cmd/relay-server/... ./internal/worker/... ./internal/scheduler/... ./internal/mcp/... ./internal/agent -timeout 600s
 
 # Run internal/api's integration lane on its own job/target rather than
-# folding it into test-pg-integration above: internal/api alone runs about
-# 1.8x that target's combined acquisition count, so adding it there would not
+# folding it into test-pg-integration above: measured in shared-service mode,
+# internal/api alone runs about 230s against the eight-package
+# test-pg-integration's about 113s wall clock, so adding it there would not
 # fit test-pg-integration's own timeout argument, it would replace it - and
 # two jobs on separate runners make the wall clock the max rather than the
 # sum, the same reason cli-integration and pg-integration are already
 # separate jobs rather than steps in one.
 #
-# -timeout 1800s, NOT 600s: this target must also work in container mode for
-# a developer with Docker and no RELAY_TEST_DATABASE_URL, where this package
+# API_TEST_TIMEOUT defaults to 1800s for a developer running this target in
+# container mode (Docker, no RELAY_TEST_DATABASE_URL), where this package
 # alone runs around 750s measured (see the comment on test-integration above)
 # with a variance band wide enough that 600s has already killed a run of it,
-# reporting FAIL with no --- FAIL line beneath it. See
-# internal/api/testhelper_test.go for the harness this shares with
-# every other integration lane in this repo.
+# reporting FAIL with no --- FAIL line beneath it. The api-integration job in
+# go-ci.yml overrides this to a value BELOW its own timeout-minutes, the same
+# ordering cli-integration's and pg-integration's comments already argue for:
+# the Go timeout fires first and prints a goroutine dump naming the hung
+# test, instead of a bare GitHub kill with nothing underneath it.
+# internal/api/testhelper_test.go's newTestPool and newTestQueries are a thin
+# adapter over internal/testsupport/pgdsn.NewIntegrationDSN, the harness this
+# lane shares with test-cli-integration and test-pg-integration.
+API_TEST_TIMEOUT ?= 1800s
+
 test-api-integration:
-	go test -tags integration -count=1 ./internal/api/... -timeout 1800s
+	go test -tags integration -count=1 ./internal/api/... -timeout $(API_TEST_TIMEOUT)
 
 # Type-check (compile) the integration-tagged code without running it. Catches
 # shared-signature breaks in //go:build integration files that the unit `test`

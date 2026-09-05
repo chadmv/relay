@@ -126,29 +126,36 @@ The item's own list is a mix of named guards and whole-surface claims. This is t
 independently, because a count is a claim about the complement and must name its instrument.
 
 **Instrument.** `Grep` (ripgrep) for `^//go:build .*integration`, restricted by glob to
-`*_test.go`, over the whole worktree, `head_limit: 0`. 137 files. Grouped by directory, and
-cross-referenced by hand against the package lists hardcoded in `Makefile`'s `test-cli-integration`
-and `test-pg-integration` targets, which are the only two integration lanes
-`.github/workflows/go-ci.yml` invokes.
+`*_test.go`, over the whole worktree, `head_limit: 0`. **Re-run on the tree rebased onto
+`origin/main` at `f746118`: 139 files**, not the 137 counted when this section was first written -
+`f1849cd` (#203) landed between the two counts and added one file each to `internal/api` and
+`internal/agent/source/perforce`. Grouped by directory, and cross-referenced by hand against the
+package lists hardcoded in `Makefile`'s `test-cli-integration` and `test-pg-integration` targets,
+which were the only two integration lanes `.github/workflows/go-ci.yml` invoked at the time this
+census was taken (before this slice's own commit added `test-api-integration`).
 
-**Axis: integration-tagged test FILES, by package, by whether a CI lane names the package.**
+**Axis: integration-tagged test FILES, by package, by whether a CI lane named the package before
+this slice's own commit.**
 
 | Package | Tagged files | External service the harness needs | In a CI lane today |
 | --- | --- | --- | --- |
-| `internal/api` | 57 | Postgres only | **no** |
+| `internal/api` | 58 | Postgres only | **no** |
 | `internal/store` | 30 | Postgres only | yes (`pg-integration`) |
 | `internal/worker` | 17 | Postgres only | **no** |
 | `internal/cli` | 11 | Postgres only | yes (`cli-integration`) |
 | `internal/schedrunner` | 7 | Postgres only | yes (`pg-integration`) |
 | `internal/scheduler` | 4 | Postgres only | **no** |
 | `cmd/relay-server` | 4 | Postgres only | yes (`pg-integration`) |
-| `internal/agent/source/perforce` | 3 | p4d container built from a Dockerfile, plus the `p4` binary on PATH | **no** |
+| `internal/agent/source/perforce` | 4 | p4d container built from a Dockerfile, plus the `p4` binary on PATH | **no** |
 | `internal/agent` | 2 | **none** | **no** |
 | `internal/mcp` | 1 | Postgres only | **no** |
 | `internal/testsupport/pgdsn` | 1 | Postgres only | yes (`pg-integration`) |
 
-53 files are in a lane CI runs. **84 are not**, and 81 of those 84 need nothing CI cannot give
-them. That 81 is the size of what remains, and it is the number this slice is about.
+53 files are in a lane CI runs. **86 are not**, and 82 of those 86 need nothing CI cannot give
+them. That 82 is the size of what remains, and it is the number this slice is about. (The two extra
+files against the original 84/81 both landed in `f1849cd`: one in `internal/api`, which needs
+nothing CI cannot give, and one in `internal/agent/source/perforce`, which does - so the delta is
++2 not-in-a-lane and +1 needs-nothing.)
 
 **The service column was established by reading, not by the tag.** The lead handed over from
 PR #201's review re-runs green: `testcontainers` appears in exactly six `*_test.go` files
@@ -648,8 +655,11 @@ something is.
   predicates checking fixtures. Different gap, still open, untouched.
 
 **The item closes.** After this slice every integration-tagged test in the module is in a lane CI
-runs, except two files in `internal/agent/source/perforce` whose refusal is written in their own
-test's comment - which is the item's own third branch, not an omission. Both remaining clauses of
+runs, except **four files** (`p4d_container_test.go`, `perforce_integration_test.go`,
+`perforce_remap_integration_test.go` and `perforce_exclusion_integration_test.go`, five
+`TestPerforce_E2E_*` funcs between them) in `internal/agent/source/perforce`, whose refusal is
+written in their own test's comment - which is the item's own third branch, not an omission. Both
+remaining clauses of
 its Acceptance / Done When are satisfied and the generalizing rule is in CLAUDE.md with a third
 job added to its list.
 
@@ -694,11 +704,15 @@ authoring session. Every runtime figure below is re-derived or quoted.
 
 **Counted by me in the tree today, with the instrument named:**
 
-- 137 integration-tagged files, and that all 137 are `_test.go` files - two `Grep` runs of
-  `^//go:build .*integration`, one globbed to `*.go` and one to `*_test.go`, `head_limit: 0`.
-- The per-package file counts in section 4.0's table - the same result, grouped by directory.
-- 53 files in a CI lane and 84 not - the same result, cross-referenced by hand against the package
-  lists in `Makefile`'s `test-cli-integration` and `test-pg-integration`.
+- 137 integration-tagged files at first writing, and that all 137 were `_test.go` files - two
+  `Grep` runs of `^//go:build .*integration`, one globbed to `*.go` and one to `*_test.go`,
+  `head_limit: 0`. **Re-run on the rebased tree: 139, still all `_test.go`** - `f1849cd` added one
+  each to `internal/api` and `internal/agent/source/perforce` between the two runs.
+- The per-package file counts in section 4.0's table - the same result, grouped by directory,
+  re-run and corrected the same way.
+- 53 files in a CI lane and 86 not (was 84, before the re-run above) - the same result,
+  cross-referenced by hand against the package lists in `Makefile`'s `test-cli-integration` and
+  `test-pg-integration` as they stood before this slice's own commit.
 - Acquisition counts, all over CALL SITES rather than executions: `internal/api` 168 raw matches
   minus 2 definition-internal, plus 1 direct `pgdsn` call, = ~167; `internal/worker` 70;
   `internal/scheduler` 18 raw minus 1 = 17; `internal/mcp` 8; `internal/store` 76 raw minus ~3

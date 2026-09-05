@@ -24,9 +24,8 @@ import (
 // The three storability properties the coordinator must give an agent-supplied
 // message before it can become a task_logs row.
 //
-// UNTAGGED ON PURPOSE. These subtests touch no database, and the lane CI runs is
-// `go test -race ./...` with no build tag; behind //go:build integration this
-// guard compiles and never executes.
+// UNTAGGED ON PURPOSE. These subtests touch no database, so tagging them
+// integration would only move them onto a database they do not need.
 func TestSanitizeAgentErrorMessage_BoundsAndValidity(t *testing.T) {
 	t.Run("a short ascii message is unchanged", func(t *testing.T) {
 		require.Equal(t, "boom", sanitizeAgentErrorMessage("boom"))
@@ -87,10 +86,9 @@ type statusStubDB struct {
 
 	// appendArgs captures the last AppendTaskLog call's positional arguments
 	// (TaskID, AssignmentEpoch, WorkerID, MinFinishedAt, Stream, Content), so a
-	// test can pin what was WRITTEN rather than only that a write happened. No
-	// existing caller drives two AppendTaskLog calls in one test, so "the last
-	// one" and "the only one" coincide; a future test that does must not trust
-	// this field across more than one call without re-checking that.
+	// test can pin what was WRITTEN rather than only that a write happened. Not
+	// synchronised: green under -race today only because every caller drives
+	// this stub from a single goroutine.
 	appendArgs []any
 }
 
@@ -285,13 +283,10 @@ func TestHandleTaskStatus_ARealAppendFailureIsLoggedAndAFenceRejectionIsNot(t *t
 
 // AppendTaskLog's positional args are TaskID, AssignmentEpoch, WorkerID,
 // MinFinishedAt, Stream, Content (internal/store/tasks.sql.go), so Stream is
-// args[4] and Content is args[5]. Before statusStubDB captured them, the stub's
-// QueryRow discarded every variadic argument at its own signature
-// (`_ ...any`), so no untagged test could observe errorMessageLogStream's
-// value at all - mutating it to "stdout" reddened nothing here. Both args are
-// pinned in one assertion so a transposition of the two reddens too, and the
-// publish leg is checked against the same stream so a caller that replaces the
-// constant at only one of handler.go's two read sites still reddens.
+// args[4] and Content is args[5]. Both are pinned in one assertion so a
+// transposition of the two reddens, and the publish leg is checked against
+// the same stream so a caller that replaces the constant at only one of
+// handler.go's two read sites still reddens.
 func TestHandleTaskStatus_ErrorMessageWritesAndPublishesTheDocumentedStream(t *testing.T) {
 	ctx := context.Background()
 	h, db := newStatusStubHandler(nil)
@@ -305,10 +300,10 @@ func TestHandleTaskStatus_ErrorMessageWritesAndPublishesTheDocumentedStream(t *t
 	assert.Equal(t, "stderr", db.appendArgs[4], "args[4] is Stream")
 	assert.Equal(t, "[failed] boom\n", db.appendArgs[5], "args[5] is Content, pinned alongside Stream so a swap of the two reddens")
 
-	events := published()
-	require.Len(t, events, 1, "the success leg must publish exactly one task-log event")
+	gotEvents := published()
+	require.Len(t, gotEvents, 1, "the success leg must publish exactly one task-log event")
 	var got map[string]any
-	require.NoError(t, json.Unmarshal(events[0].Data, &got))
+	require.NoError(t, json.Unmarshal(gotEvents[0].Data, &got))
 	assert.Equal(t, "stderr", got["stream"], "the published event must carry the same stream the row was stored with")
 }
 

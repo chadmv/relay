@@ -38,8 +38,8 @@ func storedSpecJSON(t *testing.T, nTasks, perTask int) []byte {
 // IT IS UNTAGGED ON PURPOSE. ValidateStoredSchedule is a pure function of three
 // stored values, so the retroactivity fact - a spec an older release accepted
 // stops validating - needs no Postgres. Putting it behind the integration tag
-// would put the only count-axis coverage of two call sites in the lane
-// .github/workflows/go-ci.yml never runs.
+// would move the only count-axis coverage of two call sites onto a database
+// this pure function does not need.
 //
 // WHAT IT DOES NOT PROVE, stated so nobody reads more into it: that either caller
 // is wired to this function. That is proven message-agnostically by
