@@ -86,15 +86,20 @@ func TestScheduleCap_TheThirdCreateIsRefusedAtACapOfTwo(t *testing.T) {
 	over := postSchedule(t, srv, token, "over-the-cap")
 	require.Equal(t, http.StatusConflict, over.Code,
 		"the third create must be refused with 409 by the cap buildHTTPServer was GIVEN. A missing "+
-			"check, `n > cap` instead of `n >= cap`, a check placed after the insert, a hard-coded "+
-			"default, and a deleted or crossed s.MaxSchedulesPerOwner assignment all answer 201 here. "+
-			"body: %s", over.Body.String())
+			"check, `n > cap` instead of `n >= cap`, a hard-coded default, and a deleted or crossed "+
+			"s.MaxSchedulesPerOwner assignment all answer 201 here. body: %s", over.Body.String())
 	require.Contains(t, over.Body.String(), "Delete a scheduled job before creating another",
 		"the refusal must carry the self-service remedy, which is the only remedy an actor who can "+
 			"drive this refusal should be told about")
 
 	// A refused create must roll back, not leave a row the count then charges
 	// the owner for.
+	//
+	// THIS IS A SECOND GUARD, NOT A FLOURISH, and it is the only thing that sees
+	// a check moved below tx.Commit: that mutant still answers 409 above, and
+	// leaves the row behind. Moving the check below the INSERT but above the
+	// commit is instead behaviourally EQUIVALENT - the deferred Rollback discards
+	// the row - so no assertion here distinguishes it, and none should pretend to.
 	var n int64
 	require.NoError(t, pool.QueryRow(t.Context(),
 		`SELECT count(*) FROM scheduled_jobs WHERE owner_id = $1`, user.ID).Scan(&n))
