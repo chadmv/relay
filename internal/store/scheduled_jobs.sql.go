@@ -238,6 +238,63 @@ func (q *Queries) CountScheduledJobsByOwner(ctx context.Context, arg CountSchedu
 	return count, err
 }
 
+const countScheduledJobsForOwnerUpTo = `-- name: CountScheduledJobsForOwnerUpTo :one
+SELECT COUNT(*) FROM (
+  SELECT 1 FROM scheduled_jobs
+   WHERE owner_id = $1::uuid
+   LIMIT $2::bigint
+) t
+`
+
+type CountScheduledJobsForOwnerUpToParams struct {
+	OwnerID pgtype.UUID `json:"owner_id"`
+	Ceiling int64       `json:"ceiling"`
+}
+
+// The per-owner schedule cap's SECOND statement.
+//
+// THE INNER LIMIT IS NOT AN OPTIMIZATION. Owners over the cap are grandfathered
+// and this route is in no rate-limit bucket, so a plain COUNT(*) would make every
+// REFUSED create cost a scan proportional to how many rows the owner already
+// holds - handing the actor who is already over the cap an amplification
+// primitive that grows with the damage they have done. The LIMIT answers exactly
+// the question asked, "is the count at least ceiling", with no loss on that
+// predicate.
+//
+// WHAT THE LIMIT BOUNDS IS MATCHING ROWS, NOT BLOCKS READ. The planner puts a
+// Limit node below the aggregate, so the aggregate never counts past ceiling; but
+// when it picks a sequential scan - which it does once one owner holds a large
+// share of the table, the abuse case itself - the scan still reads until it finds
+// ceiling matches, and that distance is data-layout dependent. It is never worse
+// than the plain count, and on the index path it is flat in the owner's holdings.
+// idx_scheduled_jobs_owner serves this predicate; no new index.
+//
+// THE RESULT SATURATES AT ceiling AND IS NEVER A CENSUS. Nothing may serve it,
+// log it as a total, or feed it into handleScheduledJobStats, which has its own
+// real count in ScheduledJobCounts. The refusal message therefore says "at the
+// limit" and never "you own N".
+//
+// ::bigint, NOT ::int. sqlc emits ::int as an int32, and a large number is the
+// only spelling this control has for effectively-unbounded - so the value the
+// parser accepted and the startup line printed would be silently narrowed. The
+// narrowing has three shapes and the middle one is the dangerous one: it can land
+// negative and make Postgres reject the LIMIT at runtime (a 500), it can land on
+// a different positive number and enforce a bound nobody chose, or it can land on
+// exactly ZERO - and LIMIT 0 makes the count always 0, which turns the cap off
+// silently while README promises there is no off value.
+//
+//	SELECT COUNT(*) FROM (
+//	  SELECT 1 FROM scheduled_jobs
+//	   WHERE owner_id = $1::uuid
+//	   LIMIT $2::bigint
+//	) t
+func (q *Queries) CountScheduledJobsForOwnerUpTo(ctx context.Context, arg CountScheduledJobsForOwnerUpToParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countScheduledJobsForOwnerUpTo, arg.OwnerID, arg.Ceiling)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createScheduledJob = `-- name: CreateScheduledJob :one
 INSERT INTO scheduled_jobs (
     name, owner_id, cron_expr, timezone, job_spec,
@@ -1860,6 +1917,53 @@ func (q *Queries) ListScheduledJobsPageByUpdatedDesc(ctx context.Context, arg Li
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockOwnerForScheduleCap = `-- name: LockOwnerForScheduleCap :one
+SELECT id FROM users WHERE id = $1::uuid FOR NO KEY UPDATE
+`
+
+// The per-owner schedule cap's FIRST statement. Its only job is the lock; the
+// returned id is never used.
+//
+// IT MUST BE ITS OWN STATEMENT, BEFORE THE COUNT. Under READ COMMITTED a
+// statement's snapshot is taken when the statement STARTS. A lock acquired
+// part-way through the counting statement is granted after the competitor
+// commits, but the count has already been evaluated against the older snapshot,
+// so merging the two re-opens the exact race the lock exists to close and two
+// requests at cap-1 both pass. Neither does one conditional INSERT close it, for
+// the same reason. TestScheduleCapLock_WithoutTheLockBothTransactionsInsert is
+// the control that shows the race is real.
+//
+// FOR NO KEY UPDATE, NOT FOR UPDATE, and there are two reasons. FOR UPDATE
+// conflicts with FOR KEY SHARE, which is what any insert of a row referencing
+// users(id) takes: it would block this same caller's concurrent POST /v1/jobs,
+// and - the larger blast radius - it would block schedrunner.TickOnce, whose
+// INSERT INTO jobs takes FOR KEY SHARE on the owner while the tick already holds
+// up to BatchLimit scheduled_jobs rows locked. FOR NO KEY UPDATE conflicts with
+// itself, which is all this needs.
+//
+// LOCK ORDERING IS NOT THE ARGUMENT THAT SAVES THIS, so do not reason from it.
+// handleAdminArchiveUser takes users then scheduled_jobs (ArchiveUser, then
+// DisableScheduledJobsByOwner); schedrunner.TickOnce takes them in the OPPOSITE
+// order (ListEligibleScheduledJobs FOR UPDATE, then users FOR KEY SHARE through
+// the jobs.submitted_by FK). There is still no cycle, for two reasons that must
+// BOTH hold: this transaction's INSERT creates a new row under a
+// gen_random_uuid() primary key with no other unique constraint, so it waits on
+// no existing scheduled_jobs row and can never supply a cycle's second edge; and
+// the tick's FOR KEY SHARE does not conflict with FOR NO KEY UPDATE, so the tick
+// never waits on this transaction either. Both would be false under FOR UPDATE.
+//
+// pgx.ErrNoRows is unreachable while users are archived rather than deleted, and
+// the caller handles it anyway so a future hard delete fails CLOSED instead of
+// skipping the count.
+//
+//	SELECT id FROM users WHERE id = $1::uuid FOR NO KEY UPDATE
+func (q *Queries) LockOwnerForScheduleCap(ctx context.Context, ownerID pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, lockOwnerForScheduleCap, ownerID)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const recordScheduledJobFailure = `-- name: RecordScheduledJobFailure :execrows
