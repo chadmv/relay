@@ -15,14 +15,12 @@ import (
 	"relay/internal/events"
 	"relay/internal/jobspec"
 	"relay/internal/store"
+	"relay/internal/testsupport/pgdsn"
 	"relay/internal/worker"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -31,25 +29,9 @@ import (
 // It returns the base URL, admin bearer token, non-admin bearer token, and a teardown func.
 func startRelayForMCP(t *testing.T) (baseURL, adminToken, userToken string, teardown func()) {
 	t.Helper()
-	ctx := context.Background()
+	dsn := pgdsn.NewIntegrationDSN(t)
 
-	pg, err := tcpostgres.Run(ctx, "postgres:16",
-		tcpostgres.WithDatabase("relay_test"),
-		tcpostgres.WithUsername("relay"),
-		tcpostgres.WithPassword("relay"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
-		),
-	)
-	require.NoError(t, err)
-
-	dsn, err := pg.ConnectionString(ctx, "sslmode=disable")
-	require.NoError(t, err)
-
-	migrateDSN := "pgx5" + dsn[len("postgres"):]
-	require.NoError(t, store.Migrate(migrateDSN))
-
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := pgxpool.New(context.Background(), dsn)
 	require.NoError(t, err)
 
 	q := store.New(pool)
@@ -62,10 +44,12 @@ func startRelayForMCP(t *testing.T) (baseURL, adminToken, userToken string, tear
 	adminToken = seedAndLogin(t, httpSrv.URL, q, "admin@relay-mcp-test.com", "adminpassword1", true)
 	userToken = seedAndLogin(t, httpSrv.URL, q, "user@relay-mcp-test.com", "userpassword1", false)
 
+	// The database's own teardown (DROP DATABASE, or container Terminate) is
+	// already registered on t by pgdsn.NewIntegrationDSN above; this teardown
+	// owns only what it created itself.
 	teardown = func() {
 		httpSrv.Close()
-		pool.Close()
-		_ = pg.Terminate(ctx)
+		pgdsn.BoundedCleanup(t, "mcp pgxpool.Close", pool.Close)
 	}
 	return httpSrv.URL, adminToken, userToken, teardown
 }
