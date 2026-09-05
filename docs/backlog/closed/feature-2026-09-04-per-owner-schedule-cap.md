@@ -1,7 +1,9 @@
 ---
 title: A per-owner cap on scheduled_jobs, the only bound on the boot sweep's duration
 type: feature
-status: open
+status: closed
+closed: 2026-09-04
+resolution: fixed
 created: 2026-09-04
 priority: medium
 source: Carries the surviving half 2 of bug-2026-08-28-boot-sweep-lists-every-schedule-ahead-of-the-listener, after its rate-limit half was decided OUT on 2026-09-04
@@ -78,3 +80,36 @@ Sketch only; the number is the work.
 - `internal/api/server.go` (`POST /v1/scheduled-jobs`, bare `auth`),
   `internal/api/scheduled_jobs.go` (`handleCreateScheduledJob`),
   `internal/schedrunner/startup_validation.go` (`ValidateStoredSpecsOnStartup`)
+
+## Resolution
+
+Closed by PR #205. `RELAY_MAX_SCHEDULES_PER_OWNER`, default 100, refuses `POST /v1/scheduled-jobs`
+with 409 at the cap, enforced in one transaction as lock-then-count-then-insert. Owners already over
+the cap are grandfathered.
+
+**This item's prescribed remedy does not work, and that was measured rather than argued.** The item
+says the read-then-write is safe "unless it is done in one" statement. Two sessions at cap-1 running
+exactly that conditional INSERT both committed - 3 rows against a cap of 2, with B never blocking -
+because under READ COMMITTED the subquery evaluates against the statement's own snapshot. Exactness
+needs a lock in an EARLIER statement of the same transaction, so one statement is neither necessary
+nor sufficient. `FOR NO KEY UPDATE` rather than `FOR UPDATE`, measured both ways against the real
+`jobs.submitted_by` foreign key.
+
+Two of this item's other claims were also wrong. `handleRunScheduledJobNow` has no surface here at
+all - it inserts into `jobs` and `tasks` and cannot create a `scheduled_jobs` row. And the acceptance
+criterion "the STARTING work set is bounded as a consequence" is false unqualified: the bound is
+(rows existing at landing) + owners x cap, grandfathering leaves the first term untouched, and the
+owner population is itself unbounded under `RELAY_ALLOW_SELF_REGISTER`.
+
+**The DURATION question this item raised is settled OUT, deliberately, and is not claimed here.** A
+count cap bounds the starting work set only; the paged sweep takes a fresh snapshot per page, so a
+row inserted above the cursor joins mid-pass. What would bound duration is a wall-clock deadline,
+filed as [[feature-2026-09-04-wall-clock-deadline-on-the-boot-sweep]] and cited from the sweep
+header. A second unbounded pre-listener read found while checking this is filed as
+[[bug-2026-09-04-reconcileonstartup-lists-every-overdue-schedule-unbounded]].
+
+Review found the cap failed OPEN on a legal server setting: `pool.Begin` inherited
+`default_transaction_isolation`, and under `repeatable read` the count never saw the competitor's
+row - 3 rows at a cap of 2, no error and no log line. The transaction now pins READ COMMITTED where
+it is relied on. Review also found two lock mutants that survived every test, including moving the
+lock below the count; both are killed by a concurrent guard in a lane CI runs.
