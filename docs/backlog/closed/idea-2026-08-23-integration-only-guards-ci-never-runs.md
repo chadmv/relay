@@ -1,8 +1,10 @@
 ---
 title: Three of the admission/counters/log-fence security guards run only under the integration tag CI never executes
 type: idea
-status: open
+status: closed
 created: 2026-08-23
+closed: 2026-09-04
+resolution: fixed
 priority: medium
 source: 2026-08-23 deep roadmap refresh - integration-tester lens finding
 ---
@@ -298,3 +300,44 @@ Docker to run under this mechanism - `cmd/relay-server/agent_subprocess_e2e_inte
 (`TestAgentSubprocessEndToEnd_BytesAndIdentityCrossTheRealWire`) is now in the `pg-integration` job
 this item added, and it drives one against the real listener `grpcServerOptions`/`netlimit.Wrap`
 build. The p4d clause above stands.
+
+## Resolution
+
+Closed after two slices. `internal/worker`, `internal/scheduler` and `internal/mcp` joined
+`pg-integration` by taking their database from `internal/testsupport/pgdsn`; `internal/agent`
+joined the same job as `./internal/agent` (never `./internal/agent/...`, which would silently pull
+in perforce's skip-happy tests); `internal/api` got its own `api-integration` job on its own
+timescale rather than folding into `pg-integration`. Every integration-tagged test in the module is
+now in a lane CI runs, except four files in `internal/agent/source/perforce`
+(`p4d_container_test.go`, `perforce_integration_test.go`, `perforce_remap_integration_test.go`,
+`perforce_exclusion_integration_test.go`; five `TestPerforce_E2E_*` funcs between them), whose
+refusal is written into `startP4dContainer`'s own doc comment - the item's own third acceptance
+branch, not an omission.
+
+**The title never described the item after its sixth appended instance.** Of the three guards the
+title names, two were already satisfied before either closing slice began and nothing recorded it:
+`TestHandleTaskLog_AFenceRejectionEmitsNoLogLineAtAll` already had an untagged sibling
+(`internal/worker/tasklog_fence_counter_test.go`'s
+`TestHandleTaskLog_AFenceRejectionIsCountedAndASuccessIsNot`) covering its core property, and
+`cmd/relay-server`'s `grpc_admission_e2e_integration_test.go` had already joined `pg-integration` in
+PR #201. The item's real subject for its last two months was "most of this module's integration
+tests are invisible to CI," not the three named guards its title describes - eleven appended
+instances under a title about three tests is a title that stopped being findable.
+
+`internal/worker`'s `errorMessageLogStream` guard (the 2026-09-03 instance) was closed by widening
+`statusStubDB` to capture `AppendTaskLog`'s positional arguments rather than by adding a CI job -
+the one instance in the backlog item whose remedy was a stub fix, not a lane.
+
+The generalizing clause is in place: CLAUDE.md's "A guard behind a build tag must be able to run"
+section names three `services: postgres` jobs (`cli-integration`, `pg-integration`,
+`api-integration`) and gives the ask-in-order triage (does it need the tag at all; can it join a
+lane that runs; otherwise write the refusal in the test's own comment) that a future guard is
+expected to follow.
+
+A follow-up fix round then re-derived the census against a further-rebased tree (`f1849cd` had
+landed one more tagged file each in `internal/api` and `internal/agent/source/perforce` since the
+wiring slice's own count), deleted six comments that had gone stale by asserting CI does not run
+tests it now runs, added `TestMakefileIntegrationTargetsHaveACIStep`
+(`internal/agent/ci_makefile_lockstep_guard_test.go`) pinning that every `test-*-integration`
+Makefile target has a `run: make <target>` step in `go-ci.yml`, and added `API_TEST_TIMEOUT` so a
+hang in the `api-integration` job prints a Go goroutine dump instead of a bare GitHub kill.
