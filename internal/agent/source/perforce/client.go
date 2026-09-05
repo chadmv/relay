@@ -203,6 +203,44 @@ func (c *Client) SyncStream(ctx context.Context, cwd, client string, specs []str
 	return c.r.Stream(ctx, cwd, args, onLine)
 }
 
+// PathHasFiles reports whether spec resolves to at least one file, via
+// `p4 -c <client> files -m1 <spec>`.
+//
+// IT IS A POSITIVE ASSERTION, NOT A PHRASE MATCH. p4 exits ZERO whether a
+// filespec matched or not and writes each of its several nothing-matched
+// wordings to stderr, so the reading that does not go stale on the next wording
+// is whether a matching line came back on STDOUT. testdata/p4-files holds the
+// captured artifacts, and TestPathHasFiles_ReadsTheCapturedArtifacts is the
+// guard.
+//
+// -m1 bounds the answer to one line, so the probe costs the same against a
+// subtree of ten files and one of ten million.
+//
+// It takes no cwd, for ResolveHead's reason: a subprocess cwd on a workspace
+// exposes p4 to any .p4config a previous task's build script wrote there.
+func (c *Client) PathHasFiles(ctx context.Context, client, spec string) (bool, error) {
+	out, err := c.r.Run(ctx, "", []string{"-c", client, "files", "-m1", spec}, nil)
+	if err != nil {
+		return false, err
+	}
+	return len(bytes.TrimSpace(out)) > 0, nil
+}
+
+// SyncPreempt runs `p4 -c <client> sync -k <spec>` from cwd, marking every file
+// under spec as already-have at that revision so the following real sync never
+// transfers it.
+//
+// It STREAMS stdout, for the reason SyncStream does - the excluded subtree can
+// be millions of lines. It cannot itself tell a preempt that did nothing from
+// one that worked, because p4 exits zero either way; PathHasFiles is the
+// question the caller asks first.
+//
+// NOT --parallel: the preempt transfers no file content, so there is nothing to
+// parallelise and the flag would only add threads to a metadata-only update.
+func (c *Client) SyncPreempt(ctx context.Context, cwd, client, spec string, onLine func(string)) error {
+	return c.r.Stream(ctx, cwd, []string{"-c", client, "sync", "-k", spec}, onLine)
+}
+
 // CreatePendingCL creates an empty pending changelist on the named client
 // with the given description. Returns the new CL number.
 func (c *Client) CreatePendingCL(ctx context.Context, cwd, client, description string) (int64, error) {

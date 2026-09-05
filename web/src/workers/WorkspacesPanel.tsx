@@ -63,7 +63,11 @@ export function WorkspacesPanel({ workerId }: { workerId: string }) {
           <TableRow key={ws.short_id} className={`border-b border-border/40 ${NESTED_ROW_PX} py-2 font-mono text-[11px]`}>
             <TableCell className="text-fg">{ws.short_id}</TableCell>
             <TableCell className="text-fg-mute">{ws.source_type}</TableCell>
-            <TableCell className="truncate text-fg-mute">{ws.source_key}</TableCell>
+            {/* An excluding workspace's key is "x1|<hex>|<stream>", so truncation
+                clips the stream - the only part an operator recognises - and
+                leaves the opaque digest. title is what keeps the whole key
+                reachable. */}
+            <TableCell className="truncate text-fg-mute" title={ws.source_key}>{ws.source_key}</TableCell>
             <TableCell className="text-fg-mute">{ws.baseline_hash}</TableCell>
             <TableCell className="text-fg-mute">{formatRelativeTime(ws.last_used_at)}</TableCell>
             <TableCell className="flex justify-end">

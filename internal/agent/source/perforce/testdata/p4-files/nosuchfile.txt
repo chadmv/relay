@@ -1,0 +1,4 @@
+$ p4 -c <client> files -m1 //<client>/does-not-exist/...#head
+--- stdout ---
+--- stderr ---
+//<client>/does-not-exist/...#head - no such file(s).

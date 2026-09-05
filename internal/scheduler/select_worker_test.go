@@ -6,9 +6,11 @@ package scheduler
 // package scheduler, not package scheduler_test).
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
+	"relay/internal/api"
 	"relay/internal/store"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -235,4 +237,79 @@ func TestSelectWorker_DisabledWorkerIsNotEligible(t *testing.T) {
 	)
 
 	assert.Nil(t, got, "a disabled worker must NOT be selected for dispatch")
+}
+
+// sourceTaskWithExclusion is the same stream as sourceTask plus one exclusion,
+// so the only thing that differs between the pair of tests below is the key.
+func sourceTaskWithExclusion() store.Task {
+	t := baseTask()
+	t.Source = []byte(`{"type":"perforce","stream":"//depot/main","sync":` +
+		`[{"path":"//depot/main/...","rev":"#head"},` +
+		`{"path":"//depot/main/heavy/...","exclude":true}]}`)
+	return t
+}
+
+func warmOn(id byte, key string) (store.Worker, []store.WorkerWorkspace) {
+	w := baseWorker(id, "online")
+	w.MaxSlots = 1
+	w.SupportsWorkspaces = true
+	return w, []store.WorkerWorkspace{{WorkerID: w.ID, SourceType: "perforce", SourceKey: key}}
+}
+
+// An excluded task must NOT be scored warm on a workspace holding the whole
+// stream: that workspace has no have-list preempt, and preferring it is how the
+// bias would keep pushing excluded tasks onto workspaces they cannot use. The
+// discriminator is the fewer-slots warm worker versus a freer cold one: with
+// the bias firing the warm worker wins, so a cold winner is the observable
+// proof it did not fire.
+func TestSelectWorker_AnExcludedTaskIsNotWarmOnAnUnexcludingWorkspace(t *testing.T) {
+	d := newDispatcherForTest()
+	warm, rows := warmOn(80, "//depot/main")
+	cold := baseWorker(81, "online")
+	cold.MaxSlots = 4
+	cold.SupportsWorkspaces = true
+
+	got := d.selectWorker(sourceTaskWithExclusion(), []store.Worker{warm, cold}, nil,
+		map[pgtype.UUID]int64{}, map[pgtype.UUID][]store.WorkerWorkspace{warm.ID: rows})
+
+	require.NotNil(t, got)
+	assert.Equal(t, cold.ID, got.ID, "the whole-stream workspace is not warm for an excluded task")
+}
+
+// The exact sibling. Widening the comparison without this would lose the warm
+// bias entirely and nothing would say so.
+func TestSelectWorker_AnUnexcludedTaskIsStillWarmOnItsStreamKeyedWorkspace(t *testing.T) {
+	d := newDispatcherForTest()
+	warm, rows := warmOn(82, "//depot/main")
+	cold := baseWorker(83, "online")
+	cold.MaxSlots = 4
+	cold.SupportsWorkspaces = true
+
+	task := baseTask()
+	task.Source = []byte(`{"type":"perforce","stream":"//depot/main","sync":[{"path":"//depot/main/...","rev":"#head"}]}`)
+
+	got := d.selectWorker(task, []store.Worker{warm, cold}, nil,
+		map[pgtype.UUID]int64{}, map[pgtype.UUID][]store.WorkerWorkspace{warm.ID: rows})
+
+	require.NotNil(t, got)
+	assert.Equal(t, warm.ID, got.ID, "an unexcluded task keeps today's warm bias, byte for byte")
+}
+
+// And the excluded task IS warm on the matching composite key, which kills a
+// mutant that simply stops scoring warm for anything carrying an exclusion.
+func TestSelectWorker_AnExcludedTaskIsWarmOnItsOwnCompositeKey(t *testing.T) {
+	d := newDispatcherForTest()
+	task := sourceTaskWithExclusion()
+	var s api.SourceSpec
+	require.NoError(t, json.Unmarshal(task.Source, &s))
+	warm, rows := warmOn(84, SourceKeyFromAPISpec(&s))
+	cold := baseWorker(85, "online")
+	cold.MaxSlots = 4
+	cold.SupportsWorkspaces = true
+
+	got := d.selectWorker(task, []store.Worker{warm, cold}, nil,
+		map[pgtype.UUID]int64{}, map[pgtype.UUID][]store.WorkerWorkspace{warm.ID: rows})
+
+	require.NotNil(t, got)
+	assert.Equal(t, warm.ID, got.ID)
 }

@@ -572,7 +572,8 @@ Tasks can declare an optional `source` spec. When present, the agent prepares a 
     "type": "perforce",
     "stream": "//depot/film-x/main",
     "sync": [
-      { "path": "//depot/film-x/main/...", "rev": "#head" }
+      { "path": "//depot/film-x/main/...", "rev": "#head" },
+      { "path": "//depot/film-x/main/Content/Movies/...", "exclude": true }
     ],
     "unshelves": [12345],
     "workspace_exclusive": false
@@ -583,8 +584,8 @@ Tasks can declare an optional `source` spec. When present, the agent prepares a 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `type` | Yes | Source provider — `"perforce"` is the only v1 value. |
-| `stream` | Yes | Perforce stream path. relay addresses p4 by client path, so the stream's own view - remaps included - is what defines the layout on disk. The part of a sync path that follows the stream is interpreted in the client's layout, which for a remapped stream is not the depot layout, so a narrower subpath resolves through the remap and may not name what the author intended. Workspaces are keyed by stream and reused across tasks. |
-| `sync` | Yes | One or more paths to sync. Each entry has `path` (depot path or `...`) and `rev` (`"#head"`, `@CL`, or `@label`). |
+| `stream` | Yes | Perforce stream path. relay addresses p4 by client path, so the stream's own view - remaps included - is what defines the layout on disk. The part of a sync path that follows the stream is interpreted in the client's layout, which for a remapped stream is not the depot layout, so a narrower subpath resolves through the remap and may not name what the author intended. Workspaces are keyed by stream, plus the exclusion set when the spec has one (see below), and reused across tasks. |
+| `sync` | Yes | One or more paths to sync. Each entry has `path` (depot path or `...`) and `rev` (`"#head"`, `@CL`, or `@label`). An entry may instead set `"exclude": true`, which leaves that path out of the sync; an excluded entry carries no `rev` (it is applied at the revision of the include that covers it) and must be covered by exactly one included path. At most 16 exclusions per spec. A relay-server that does not know the field ignores it and syncs the whole path. |
 | `unshelves` | No | List of pending changelist numbers to unshelve into the workspace before running. Reverted automatically after the task. |
 | `workspace_exclusive` | No | If `true`, take an exclusive lock on the workspace (other tasks for the same stream queue). Default `false`. |
 
@@ -592,7 +593,13 @@ Tasks can declare an optional `source` spec. When present, the agent prepares a 
 
 **Workspace arbitration.** Multiple tasks targeting the same stream on the same worker share the workspace under a three-rule policy: tasks with the *same baseline* run concurrently; tasks needing additional but disjoint sync paths join additively; everything else serializes. Tasks with `workspace_exclusive: true` always serialize.
 
-**Warm-workspace preference.** The dispatcher prefers workers that already have a synced workspace for the task's stream — even if a colder worker has more free slots. The preference is a soft bias, not a hard pin: if no warm worker is free, a cold worker is used.
+**Warm-workspace preference.** The dispatcher prefers workers that already have a synced workspace for the task's stream and exclusion set — even if a colder worker has more free slots. The preference is a soft bias, not a hard pin: if no warm worker is free, a cold worker is used.
+
+**Exclusions change the workspace identity.** A task's exclusion set is part of the key its workspace is stored under, so two tasks on one stream with different exclusion sets hold two separate workspaces on the same agent, each nearly full size. That is what stops one task's exclusion from removing files another task asked for, and it means an exclusion can INCREASE total disk use on a shared agent rather than reduce it. Exclusions pay when they are uniform for that stream on that agent. Each distinct exclusion set also mints its own workspace directory and its own persistent p4 client spec on the shared Perforce server, and both are created before the exclusion paths are checked, so a spec whose exclusions name nothing leaves a directory and a client behind before it fails.
+
+**An exclusion that matches nothing fails the task's prepare.** p4 exits zero when a path matches no files, so before applying each exclusion relay asks p4 whether it resolves to at least one file and refuses when it does not - a silently inert exclusion would otherwise be discovered only after the volume filled. This catches a typo, and it catches an exclusion under a stream whose view remaps the subtree, where the path addresses nothing. A subtree that is legitimately empty at that revision is refused too; the remedy is to delete an exclusion that was doing nothing.
+
+**Exclusions need every agent in the fleet on a build that supports them, and nothing checks that.** Protobuf drops a field an agent's build does not know, so an older agent syncs the excluded path in full and reports success: there is no error, no warning, and no log line saying the exclusion was ignored. The coordinator does not ask an agent whether it honours exclusions and does not detect the mismatch afterwards, so on a mixed-version fleet whether a task's exclusions take effect depends on which agent it lands on. Upgrade every agent before using exclusions.
 
 **Eviction.** Workspaces persist between tasks. The sweeper goroutine evicts:
 - Workspaces idle longer than `RELAY_WORKSPACE_MAX_AGE`.

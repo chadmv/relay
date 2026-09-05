@@ -1280,9 +1280,17 @@ func (x *PerforceSource) GetClientTemplate() string {
 }
 
 type SyncEntry struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	Rev           string                 `protobuf:"bytes,2,opt,name=rev,proto3" json:"rev,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Path  string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Rev   string                 `protobuf:"bytes,2,opt,name=rev,proto3" json:"rev,omitempty"`
+	// An excluded path is have-marked (p4 sync -k) before the real sync, so p4
+	// never transfers it. It carries no rev: the agent preempts at the resolved
+	// revision of the include that covers it, and jobspec.validateSourceSpec
+	// refuses a rev here.
+	//
+	// A plain bool, not optional: an agent that drops the field syncs everything,
+	// which is version skew to be closed on the dispatch side rather than here.
+	Exclude       bool `protobuf:"varint,3,opt,name=exclude,proto3" json:"exclude,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1329,6 +1337,13 @@ func (x *SyncEntry) GetRev() string {
 		return x.Rev
 	}
 	return ""
+}
+
+func (x *SyncEntry) GetExclude() bool {
+	if x != nil {
+		return x.Exclude
+	}
+	return false
 }
 
 type WorkspaceInventoryUpdate struct {
@@ -1570,10 +1585,11 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\tunshelves\x18\x03 \x03(\x03R\tunshelves\x12/\n" +
 	"\x13workspace_exclusive\x18\x04 \x01(\bR\x12workspaceExclusive\x12,\n" +
 	"\x0fclient_template\x18\x05 \x01(\tH\x00R\x0eclientTemplate\x88\x01\x01B\x12\n" +
-	"\x10_client_template\"1\n" +
+	"\x10_client_template\"K\n" +
 	"\tSyncEntry\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x10\n" +
-	"\x03rev\x18\x02 \x01(\tR\x03rev\"\xd6\x01\n" +
+	"\x03rev\x18\x02 \x01(\tR\x03rev\x12\x18\n" +
+	"\aexclude\x18\x03 \x01(\bR\aexclude\"\xd6\x01\n" +
 	"\x18WorkspaceInventoryUpdate\x12\x1f\n" +
 	"\vsource_type\x18\x01 \x01(\tR\n" +
 	"sourceType\x12\x1d\n" +

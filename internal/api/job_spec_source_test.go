@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -39,6 +40,32 @@ func TestValidateJobSpec_Source_Perforce(t *testing.T) {
 		{"sync path not depot", func(s *JobSpec) {
 			s.Tasks[0].Source.Sync = []SyncEntry{{Path: "relative/path", Rev: "#head"}}
 		}, "must start with //"},
+		// The prefix and containment rules constrain where a path STARTS and
+		// what it is under; they say nothing about its interior bytes. A NUL
+		// there is the sharp case: perforce.SourceKey separates the exclusion
+		// set with one, so two different sets can canonicalise to a single
+		// workspace key, and Postgres refuses \u0000 inside jsonb, which turns
+		// a job submission into a 500 instead of a 400. Both are fixed by
+		// refusing the byte here.
+		{"stream carrying a NUL", func(s *JobSpec) {
+			s.Tasks[0].Source.Stream = "//streams/X/ma\x00in"
+			s.Tasks[0].Source.Sync = []SyncEntry{{Path: "//streams/X/ma\x00in/...", Rev: "#head"}}
+		}, "stream must not contain control characters"},
+		{"sync path carrying a NUL", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync[0].Path = "//streams/X/main/a\x00b/..."
+		}, "must not contain control characters"},
+		// A newline is the same class and the cheaper one to reach: it survives
+		// jsonb, so a stored spec carrying one would reach the agent's argv and
+		// its progress log.
+		{"sync path carrying a newline", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync[0].Path = "//streams/X/main/a\nb/..."
+		}, "must not contain control characters"},
+		{"excluded path carrying a NUL", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = []SyncEntry{
+				{Path: "//streams/X/main/...", Rev: "#head"},
+				{Path: "//streams/X/main/He\x00avy/...", Exclude: true},
+			}
+		}, "must not contain control characters"},
 		{"bad rev", func(s *JobSpec) {
 			s.Tasks[0].Source.Sync[0].Rev = "garbage"
 		}, "invalid rev"},
@@ -62,6 +89,87 @@ func TestValidateJobSpec_Source_Perforce(t *testing.T) {
 			tmpl := "base-template"
 			s.Tasks[0].Source.ClientTemplate = &tmpl
 		}, ""},
+		// --- exclusions ---
+		{"exclusion happy path", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = []SyncEntry{
+				{Path: "//streams/X/main/...", Rev: "#head"},
+				{Path: "//streams/X/main/Content/Movies/...", Exclude: true},
+			}
+		}, ""},
+		// The preempt's revision comes from the covering include and from
+		// nothing else; a second revision here would name a different one, and a
+		// preempt at the wrong revision fetches the excluded subtree BACKWARDS
+		// rather than merely failing to exclude.
+		{"exclusion carrying a revision", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = []SyncEntry{
+				{Path: "//streams/X/main/...", Rev: "#head"},
+				{Path: "//streams/X/main/Content/Movies/...", Rev: "#head", Exclude: true},
+			}
+		}, "an excluded path carries no revision"},
+		{"uncovered exclusion", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = []SyncEntry{
+				{Path: "//streams/X/main/Code/...", Rev: "#head"},
+				{Path: "//streams/X/main/Content/Movies/...", Exclude: true},
+			}
+		}, "covered by exactly one included path, found 0"},
+		{"exclusion covered twice at different revs", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = []SyncEntry{
+				{Path: "//streams/X/main/...", Rev: "@100"},
+				{Path: "//streams/X/main/Content/...", Rev: "@200"},
+				{Path: "//streams/X/main/Content/Movies/...", Exclude: true},
+			}
+		}, "covered by exactly one included path, found 2"},
+		// Two IDENTICAL literal revs, and still ambiguous: #head resolves per
+		// path on the agent, so these two can land on different changelists and
+		// the validator cannot see it.
+		{"exclusion covered twice at the same literal rev", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = []SyncEntry{
+				{Path: "//streams/X/main/...", Rev: "#head"},
+				{Path: "//streams/X/main/Content/...", Rev: "#head"},
+				{Path: "//streams/X/main/Content/Movies/...", Exclude: true},
+			}
+		}, "covered by exactly one included path, found 2"},
+		{"exclusion equal to its include", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = []SyncEntry{
+				{Path: "//streams/X/main/Content/...", Rev: "#head"},
+				{Path: "//streams/X/main/Content/...", Exclude: true},
+			}
+		}, "leaves included path"},
+		// The exclusion is BROADER than the second include, so that include has
+		// nothing left. It is not covered BY that include, which is why the
+		// swallow check runs against every include rather than the covering one.
+		{"exclusion swallowing a narrower include", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = []SyncEntry{
+				{Path: "//streams/X/main/...", Rev: "#head"},
+				{Path: "//streams/X/main/Content/Movies/...", Rev: "#head"},
+				{Path: "//streams/X/main/Content/...", Exclude: true},
+			}
+		}, "leaves included path"},
+		{"sixteen exclusions is allowed", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = manySyncExclusions(16)
+		}, ""},
+		{"seventeen exclusions", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = manySyncExclusions(17)
+		}, "at most 16 excluded sync paths are allowed, got 17"},
+		// An exclusion is still a path under the stream. No new code enforces
+		// this - the existing per-entry containment check already runs for every
+		// entry - so the case pins that the exclusion branch did not skip past
+		// it.
+		{"exclusion outside the stream", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = []SyncEntry{
+				{Path: "//streams/X/main/...", Rev: "#head"},
+				{Path: "//other/depot/...", Exclude: true},
+			}
+		}, "must be under stream"},
+		// A sibling that shares a textual prefix but is not under the include.
+		// TestToClientPath's sharesATextualPrefixButIsNotUnder row is the same
+		// hazard one layer down; this is the discriminator for DepotPathCovers.
+		{"exclusion under a sibling sharing a textual prefix", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = []SyncEntry{
+				{Path: "//streams/X/main/Content/...", Rev: "#head"},
+				{Path: "//streams/X/main/ContentExtra/Movies/...", Exclude: true},
+			}
+		}, "covered by exactly one included path, found 0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,4 +183,15 @@ func TestValidateJobSpec_Source_Perforce(t *testing.T) {
 			}
 		})
 	}
+}
+
+// manySyncExclusions returns one include covering n distinct exclusions, so the
+// only rule an over-count case can trip is the count itself: each exclusion is
+// covered exactly once and swallows nothing.
+func manySyncExclusions(n int) []SyncEntry {
+	out := []SyncEntry{{Path: "//streams/X/main/...", Rev: "#head"}}
+	for i := 0; i < n; i++ {
+		out = append(out, SyncEntry{Path: fmt.Sprintf("//streams/X/main/d%02d/...", i), Exclude: true})
+	}
+	return out
 }

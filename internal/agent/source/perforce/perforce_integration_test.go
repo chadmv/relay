@@ -65,10 +65,12 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	})
 	require.NoError(t, err, "Prepare should succeed")
 
-	// The one-file baseline produces exactly one file line and no totals line.
+	// The two-file baseline (readme.txt plus heavy/asset.txt) produces exactly
+	// two file lines and no totals line. require.Len counts PROGRESS LINES, not
+	// files, and stays at 2.
 	require.Len(t, progress1, 2, "the two brackets and nothing else, got: %v", progress1)
-	require.Equal(t, 1, countLinesContaining(progress1, "1 files; 0 other lines"),
-		"real p4 wrote one file line and the counter saw it, got: %v", progress1)
+	require.Equal(t, 1, countLinesContaining(progress1, "2 files; 0 other lines"),
+		"real p4 wrote two file lines and the counter saw them, got: %v", progress1)
 	// The depot path IS carried, as the summary's trailing field, so its
 	// presence proves nothing. What a forwarded p4 file line would carry and a
 	// summary never can is the rev separator: syncLineDepotPath cuts the path at
