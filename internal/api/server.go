@@ -17,6 +17,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// DefaultMaxSchedulesPerOwner bounds how many scheduled_jobs rows one owner may
+// hold before POST /v1/scheduled-jobs refuses to create another.
+//
+// WHAT IT MUST NOT REFUSE: a studio maintaining one schedule per project per
+// cadence - a nightly build, a weekly cleanup, a per-show render - which is tens
+// at the outside. WHAT IT DELIBERATELY REFUSES: a pipeline service account
+// minting one schedule per shot or per asset. The remedy for that shape is one
+// schedule whose job_spec fans out into tasks, which is the model relay is built
+// around; raising the number is the other, and it stays visible in the
+// environment.
+//
+// The cap counts ALL of an owner's rows, enabled or not, so a PATCH cannot
+// increase the count and creation stays the only enforcement point.
+const DefaultMaxSchedulesPerOwner = 100
+
 // Server holds shared dependencies for all HTTP handlers.
 type Server struct {
 	pool             *pgxpool.Pool
