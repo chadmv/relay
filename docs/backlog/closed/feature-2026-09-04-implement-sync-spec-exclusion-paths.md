@@ -1,7 +1,9 @@
 ---
 title: Implement sync-spec exclusion paths per the 2026-09-04 design spec
 type: feature
-status: open
+status: closed
+closed: 2026-09-04
+resolution: fixed
 created: 2026-09-04
 priority: medium
 source: Carries the implementation half of idea-2026-09-03-sync-spec-exclusion-paths-design, whose spec landed 2026-09-04
@@ -46,3 +48,34 @@ prevent. The overflow converts to sweeper eviction churn, which is unmeasurable 
 - [[bug-2026-09-04-p4-sync-reports-not-in-client-view-and-exits-zero]] - the preempt inherits it
 - `internal/agent/source/perforce/perforce.go`, `baseline.go`, `internal/jobspec/jobspec.go`,
   `internal/scheduler/dispatch.go`
+
+## Resolution
+
+Closed by PR #203 (`f1849cd`), Stage 1 of the design spec. Every acceptance bullet is met: the
+excluding-first p4d test passes, `SourceKey` ignoring exclusions kills it, `BaselineHash` covers the
+exclusion set, the dispatcher's warm bias keys on a server-side key function, and a task with no
+exclusions keeps today's key and hash byte for byte against a golden captured at HEAD.
+
+**Review found a security defect in the first implementation and it was reproduced against live
+p4d.** The refusal for an inert exclusion matched one phrase, `"no such file"`. p4 has a family of
+these and all exit zero, and on a REMAPPED stream - one of the two routes the design names as its
+reason for existing - `sync -k` returns "file(s) not in client view", the predicate returned false,
+the excluded subtree transferred in full, and the task reported success. Replaced with a positive
+assertion: `p4 files -m1` before each preempt, refusing on empty stdout. That states the property
+rather than reading p4's prose, is independent of the have-list (so a warm workspace still reads as
+success, which `sync -n` would not), and closed a phrase-match false positive for free.
+
+A second review finding was a missing guard rather than a bug: the preempt-failure `handle.Release()`
+calls were correct and deleting them left the whole package green, while the control on the
+sync-failure release reddened at once. Three refusals now have three subtests and three orthogonal
+mutation kills.
+
+Stage 2 - the agent/coordinator version skew, where protobuf drops the unknown field and an older
+agent syncs everything and reports success - is deliberately NOT in this slice. README states it as
+a live limitation on its own terms, naming the mechanism, the observable and the operator action,
+promising no future fix so it does not become a lie if Stage 2 never lands.
+
+One finding filed rather than fixed:
+[[idea-2026-09-04-a-job-author-controls-how-many-p4-clients-each-agent-creates]]. The Go/Python
+validator pair (`jobspec.SyncEntry` against `Sync`) remains guarded by nothing; the SDK is
+uniformly looser than the server, which is drift in the safe direction rather than a hole.
