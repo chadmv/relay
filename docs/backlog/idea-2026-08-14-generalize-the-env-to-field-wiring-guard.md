@@ -381,3 +381,50 @@ That slice closed the half it could reach - the provider's ticker seam now captu
 requested duration, so a hard-coded interval at the call site goes red - but the
 env-var-to-`Config`-field hop is still unpinned, and a monitoring feature that is silently
 absent is worse than one that is loudly broken.
+
+## 2026-09-04: another copy, and a row already written in this item's shape
+
+The change-password rate-limit slice added `passwordChangeLimitN` /
+`passwordChangeLimitWin` to `httpServerDeps` and guarded main's literal with
+`TestMain_PassesThePasswordChangeLimitItParsed`
+(`cmd/relay-server/password_ratelimit_wiring_test.go`).
+
+Three things that slice owes this item:
+
+- **The guard was written as this item's table**, not as a bespoke walk: one row per wired
+  field, with columns for the field, the function its value must derive from, and the env-var
+  literal that distinguishes it from a same-typed sibling. Lifting it should be a matter of
+  moving rows, not redesigning the walk. It also asserts that the statement immediately after
+  the `ParseRateLimit` call is an `err != nil` branch that ends the process, because deleting
+  that branch compiles and leaves every other check green.
+- **A correctness note for whoever generalizes.** `TestServerCountersIsWiredByMain`'s
+  derivation walk skips any assignment where `len(Lhs) != len(Rhs)`. Every rate-limit parse in
+  `main` binds three names from one `api.ParseRateLimit` call, so that walk collects nothing
+  for either name and a generalization built on it is RED on correct code. This was measured,
+  not reasoned: substituting that filter into the new guard, against correct `main.go`, fails
+  with `httpServerDeps.passwordChangeLimitN is fed "passwordChangeN", which does not derive
+  from ParseRateLimit`. The arity-tolerant walk in `TestWatchdogIsStartedByMain` is the one to
+  lift.
+- **All four mutations this item cares about were run against the new guard, each with a
+  discard added for the local it orphans where one was needed, and all four were killed**:
+  the literal set to `0` (the plain-identifier assertion), the field fed another
+  same-typed local `searchN` (the env-var-reachability assertion, not the other-env one - the
+  chain does reach `ParseRateLimit`, so only the env-var name discriminates), the field
+  omitted (the field-presence assertion), and a later `= 0` inside an `if` (the
+  assigned-exactly-once assertion). Every executed `TestBuildHTTPServer*` test in the same
+  package stayed green under the fourth, which is the clearest available demonstration of what
+  the parse buys over execution here.
+
+Note for whoever generalizes: THREE of those four do not compile in their naive form - the
+zeroed literal, the crossed literal and the omitted field all orphan `passwordChangeN`; only
+the later `= 0` inside an `if` builds. Two more rows of the wider battery for this slice are
+non-compiling for the same reason on the other side: leaving the route bare `auth(...)`, and
+substituting `userLimit` for `passwordLimit`, each orphan `passwordLimit` in
+`internal/api/server.go`. A battery that records any of the five as a kill without adding a
+discard for the orphaned local is recording build failures, not guard failures.
+
+**Proposed, for the human rather than applied: raise this item from `low` to `medium`.** The
+argument is this item's own Notes - reconsider the priority the next time somebody adds a
+post-construction field in `cmd/relay-server` - and the fact that the next slice under time
+pressure now has one more nearby copy to paste. The `priority:` frontmatter is deliberately
+left untouched.

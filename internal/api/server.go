@@ -75,10 +75,10 @@ type Server struct {
 	// AUTHENTICATED PRINCIPAL may issue per window, across GET /v1/jobs and
 	// GET /v1/scheduled-jobs together. Set by cmd/relay-server's buildHTTPServer
 	// from RELAY_JOB_SEARCH_RATE_LIMIT. Either field at or below zero leaves the
-	// bucket unarmed, which is the only disabled state and is deliberately
-	// Go-reachable only: ParseRateLimit rejects a zero count and main is fatal on
-	// it, so an operator cannot turn the control off from the environment. The
-	// escape is a large number.
+	// bucket unarmed, and the environment cannot reach that state: ParseRateLimit
+	// refuses a zero count and a zero window, and main is fatal on the error.
+	// Every other value boots, and a smaller window is a LOOSER bound rather than
+	// a tighter one.
 	//
 	// Exported FIELDS rather than two more arguments on New, whose tail is
 	// already four same-typed arguments in a row; buildHTTPServer's own doc
@@ -90,6 +90,24 @@ type Server struct {
 	// pool itself as the concurrency ceiling it has always been.
 	SearchLimitN   int
 	SearchLimitWin time.Duration
+
+	// PasswordChangeLimitN and PasswordChangeLimitWin bound how many
+	// PUT /v1/users/me/password requests ONE AUTHENTICATED PRINCIPAL may issue
+	// per window. Set by cmd/relay-server's buildHTTPServer from
+	// RELAY_PASSWORD_CHANGE_RATE_LIMIT.
+	//
+	// The ceiling is small because handleChangePassword runs a bcrypt compare at
+	// the shipped cost on every request that gets past readJSON and the
+	// eight-character length guard, and a second bcrypt operation on success,
+	// while the legitimate pattern is a human retyping a credential into a form.
+	//
+	// Zero on EITHER field leaves the bucket off, which is what a Go caller
+	// building a Server directly wants, and the guard in Handler is not
+	// cosmetic: rateLimiter.allow indexes hits[0] whenever len(hits) >= limit,
+	// so a zero limit panics on the first request. Same environment reasoning as
+	// SearchLimitN above.
+	PasswordChangeLimitN   int
+	PasswordChangeLimitWin time.Duration
 
 	// searchLimiterOnce guards ONE limiter per Server. Every limiter constructor
 	// in this package starts a gcLoop goroutine that is never stopped, so a
@@ -125,9 +143,17 @@ func New(
 	}
 }
 
-// Handler returns an http.Handler with all routes registered. Call it once per
-// Server: each call allocates a fresh job-submit bucket and starts the gc
-// goroutine that prunes it, and that goroutine is never stopped.
+// Handler returns an http.Handler with all routes registered.
+//
+// CALL IT ONCE PER Server. Every limiter this function builds is a fresh bucket
+// with its own gc goroutine that nothing stops, so a second call is a second
+// budget as well as a leak. The search bucket is the carve-out and is unaffected:
+// searchRateLimiter memoizes one per Server and is built inside the handler, for
+// the reason search_ratelimit.go gives.
+//
+// A test that drives more than one request through a limiter built here must bind
+// the result once and reuse it; re-deriving it per request gives each request its
+// own empty window.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -150,6 +176,22 @@ func (s *Server) Handler() http.Handler {
 		userLimit = UserRateLimit(s.JobSubmitLimitN, s.JobSubmitLimitWin)
 	}
 
+	// A SEPARATE bucket from userLimit, not a fourth route on it. That one
+	// bounds how much task EXECUTION a principal buys, at a burst sized for job
+	// submission; this bounds how much CPU in a key-derivation function it buys,
+	// at a burst sized for a human retyping a password. Folded together, either
+	// this route inherits a ceiling it can never reach or the submit ceiling
+	// drops to password-change rates.
+	//
+	// Built here, not per route and not per request: UserRateLimit starts a gc
+	// goroutine that is never stopped, so a second instance is a second budget
+	// and a leak. cmd/relay-server's TestBuildHTTPServer_ThePasswordBucketIsWired-
+	// WithTheConfiguredLimit is what pins that, at a ceiling of two.
+	passwordLimit := func(h http.Handler) http.Handler { return h }
+	if s.PasswordChangeLimitN > 0 && s.PasswordChangeLimitWin > 0 {
+		passwordLimit = UserRateLimit(s.PasswordChangeLimitN, s.PasswordChangeLimitWin)
+	}
+
 	// Public endpoints
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
 	mux.HandleFunc("GET /v1/config", s.handleConfig)
@@ -170,7 +212,11 @@ func (s *Server) Handler() http.Handler {
 
 	// Auth (self-service)
 	mux.Handle("GET /v1/users/me", auth(http.HandlerFunc(s.handleGetMe)))
-	mux.Handle("PUT /v1/users/me/password", auth(http.HandlerFunc(s.handleChangePassword)))
+	// auth(passwordLimit(h)), never passwordLimit(auth(h)): UserRateLimit reads
+	// the principal off the request context, which only BearerAuth puts there,
+	// so the outer form refuses every request with a 401 it has no business
+	// issuing. RELAY_PASSWORD_CHANGE_RATE_LIMIT.
+	mux.Handle("PUT /v1/users/me/password", auth(passwordLimit(http.HandlerFunc(s.handleChangePassword))))
 	mux.Handle("DELETE /v1/auth/token", auth(http.HandlerFunc(s.handleLogoutCurrent)))
 	mux.Handle("DELETE /v1/auth/tokens", auth(http.HandlerFunc(s.handleLogoutAll)))
 	// auth(...) only, NOT admin(...): this is the self-service block. Rows are
