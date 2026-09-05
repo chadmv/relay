@@ -90,15 +90,17 @@ const sweepPageSize = 100
 // duration. The caller runs this before srv.ListenAndServe(), so a large enough
 // scheduled_jobs table still delays the boot, and the HTTP API an operator would
 // use to delete the offending rows is exactly what never comes up. Growing that
-// table is an ordinary authenticated user's privilege. A per-owner schedule cap
-// would bound the STARTING work set and not the pass, because every page is a
-// fresh snapshot: a row inserted mid-sweep joins the work set whenever its
-// gen_random_uuid() id sorts above the cursor, so an owner sitting at a cap can
-// delete and re-POST to keep feeding one. The pass still converges, since the
-// unswept fraction of the key space only shrinks, so that residual is duration
-// amplification rather than non-termination - and bounding the duration itself
-// wants a deadline or a page ceiling on the sweep. The cap and that open
-// question: docs/backlog/feature-2026-09-04-per-owner-schedule-cap.md.
+// table is an ordinary authenticated user's privilege, bounded per owner (NOT
+// per fleet) by RELAY_MAX_SCHEDULES_PER_OWNER: M accounts hold M x that number,
+// and how many accounts exist is a separate question with a separate control.
+// THAT CAP BOUNDS THE STARTING WORK SET AND NOT THE PASS, because every page is
+// a fresh snapshot: a row inserted mid-sweep joins the work set whenever its
+// gen_random_uuid() id sorts above the cursor, so an owner sitting at the cap
+// can delete and re-POST to keep feeding one. The pass still converges, since
+// the unswept fraction of the key space only shrinks, so that residual is
+// duration amplification rather than non-termination - and
+// bounding the duration itself wants a deadline on this sweep:
+// docs/backlog/feature-2026-09-04-wall-clock-deadline-on-the-boot-sweep.md.
 //
 // Cost: for N enabled schedules that do not change during the pass,
 // floor(N/sweepPageSize)+1 SELECTs and one UPDATE per BROKEN row, with peak

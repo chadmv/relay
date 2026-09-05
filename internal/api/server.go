@@ -17,6 +17,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// DefaultMaxSchedulesPerOwner bounds how many scheduled_jobs rows one owner may
+// hold before POST /v1/scheduled-jobs refuses to create another.
+//
+// WHAT IT MUST NOT REFUSE: a studio maintaining one schedule per project per
+// cadence - a nightly build, a weekly cleanup, a per-show render - which is tens
+// at the outside. WHAT IT DELIBERATELY REFUSES: a pipeline service account
+// minting one schedule per shot or per asset. The remedy for that shape is one
+// schedule whose job_spec fans out into tasks, which is the model relay is built
+// around; raising the number is the other, and it stays visible in the
+// environment.
+//
+// The cap counts ALL of an owner's rows, enabled or not, so a PATCH cannot
+// increase the count and creation stays the only enforcement point.
+const DefaultMaxSchedulesPerOwner = 100
+
 // Server holds shared dependencies for all HTTP handlers.
 type Server struct {
 	pool             *pgxpool.Pool
@@ -108,6 +123,17 @@ type Server struct {
 	// SearchLimitN above.
 	PasswordChangeLimitN   int
 	PasswordChangeLimitWin time.Duration
+
+	// MaxSchedulesPerOwner bounds how many scheduled_jobs rows one owner may
+	// hold. Set by cmd/relay-server's buildHTTPServer from
+	// RELAY_MAX_SCHEDULES_PER_OWNER. A NAMED FIELD, never another positional
+	// argument to New, for the reason SearchLimitN above gives.
+	//
+	// Read it through maxSchedulesPerOwner(), never directly: a non-positive
+	// value folds to DefaultMaxSchedulesPerOwner, so a deleted or crossed wiring
+	// assignment degrades to "the operator's number was ignored" instead of
+	// "every create is refused".
+	MaxSchedulesPerOwner int
 
 	// searchLimiterOnce guards ONE limiter per Server. Every limiter constructor
 	// in this package starts a gcLoop goroutine that is never stopped, so a
@@ -326,6 +352,17 @@ func (s *Server) Handler() http.Handler {
 }
 
 // ─── JSON helpers ────────────────────────────────────────────────────────────
+
+// maxSchedulesPerOwner resolves the effective per-owner schedule cap. Unlike
+// Handler.autoEnrollWorkerCeiling, zero is NOT a real answer here and does not
+// disable the cap: there is no route by which an operator can turn this control
+// off, and parseScheduleCap folds 0 to the default before it ever arrives.
+func (s *Server) maxSchedulesPerOwner() int {
+	if s.MaxSchedulesPerOwner < 1 {
+		return DefaultMaxSchedulesPerOwner
+	}
+	return s.MaxSchedulesPerOwner
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

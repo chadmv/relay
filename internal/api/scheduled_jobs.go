@@ -182,7 +182,72 @@ func (s *Server) handleCreateScheduledJob(w http.ResponseWriter, r *http.Request
 		enabled = *req.Enabled
 	}
 
-	row, err := s.q.CreateScheduledJob(r.Context(), store.CreateScheduledJobParams{
+	// THE TRANSACTION OPENS HERE, AFTER ALL BODY VALIDATION, which is CPU-only.
+	// Putting the cap check ahead of it would turn a malformed-body flood into a
+	// lock-acquisition flood on the owner's users row and buy nothing: an invalid
+	// request cannot create a row whether the owner is at the cap or not.
+	//
+	// READ COMMITTED IS PINNED, NOT INHERITED. pool.Begin adopts the server's
+	// default_transaction_isolation, which an operator may set to REPEATABLE READ
+	// for reasons of their own. At that level a transaction's snapshot is fixed
+	// at its FIRST statement - the lock - so the loser blocks, acquires the lock,
+	// and then counts against a snapshot that predates the winner's row: the lock
+	// still works and the cap is off, with no error and no log line.
+	// TestScheduleCap_HoldsWhenTheDatabaseDefaultsToRepeatableRead is the guard.
+	ctx := r.Context()
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create scheduled job failed")
+		return
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	txq := s.q.WithTx(tx)
+
+	// Statement 1: the lock. Its own statement, BEFORE the count, so the count's
+	// snapshot is taken after any competitor has committed. See the query's own
+	// header for why merging the two re-opens the race.
+	if _, err := txq.LockOwnerForScheduleCap(ctx, u.ID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Unreachable while users are archived rather than deleted. Handled so a
+			// future hard delete fails CLOSED rather than skipping the count.
+			log.Printf("scheduled_jobs: cap lock found no owner row for %s", uuidStr(u.ID))
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "create scheduled job failed")
+		return
+	}
+
+	// Statement 2: the BOUNDED count. n saturates at the cap and is never a
+	// census, which is why the refusal below names the limit and never the count.
+	limit := s.maxSchedulesPerOwner()
+	n, err := txq.CountScheduledJobsForOwnerUpTo(ctx, store.CountScheduledJobsForOwnerUpToParams{
+		OwnerID: u.ID,
+		Ceiling: int64(limit),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create scheduled job failed")
+		return
+	}
+	// 409, not 429 and not 400: it is not a rate and the input is not invalid.
+	// relayclient.ErrorIsTransient classifies 409 as NOT transient, so no poller
+	// retries it and the caller must act. Admins are NOT exempt - this route is
+	// reachable by every authenticated principal, so an exemption would carve a
+	// hole in a control everyone else is subject to, for the population most
+	// likely to be running the automation that fills the table.
+	//
+	// The message does not name the environment variable and does not say "ask an
+	// operator to raise it": a refusal an actor can drive must not advertise, to
+	// that actor, the remedy that loosens the control.
+	if n >= int64(limit) {
+		writeError(w, http.StatusConflict, fmt.Sprintf(
+			"scheduled job limit reached: this account is at the per-owner limit of %d. "+
+				"Delete a scheduled job before creating another.", limit))
+		return
+	}
+
+	// Statement 3: the insert, unchanged.
+	row, err := txq.CreateScheduledJob(ctx, store.CreateScheduledJobParams{
 		Name:          req.Name,
 		OwnerID:       u.ID,
 		CronExpr:      req.CronExpr,
@@ -193,6 +258,10 @@ func (s *Server) handleCreateScheduledJob(w http.ResponseWriter, r *http.Request
 		NextRunAt:     pgtype.Timestamptz{Time: next, Valid: true},
 	})
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create scheduled job failed")
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, "create scheduled job failed")
 		return
 	}
