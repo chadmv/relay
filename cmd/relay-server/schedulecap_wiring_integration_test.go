@@ -109,10 +109,6 @@ func TestScheduleCap_TheThirdCreateIsRefusedAtACapOfTwo(t *testing.T) {
 // TestScheduleCap_AnAdminIsRefusedExactlyAsANonAdminIs pins that there is no
 // admin exemption.
 //
-// THE ADMIN CASE RUNS FIRST, so an early-exit exemption
-// (`if u.IsAdmin { skip the check }`) cannot pass by never being reached: a
-// decoy placed after its target is read by neither the code nor the mutant.
-//
 // The refused request is in each arm for the same reason as the sibling test
 // above: two successes under a cap of two are also what an absent control
 // produces, so only the 409 distinguishes "the admin is subject to the cap"

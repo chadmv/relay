@@ -213,8 +213,10 @@ func TestScheduleCapLock_WithoutTheLockBothTransactionsInsert(t *testing.T) {
 // RecordScheduledJobFailure. It would also break fixtures that plant rows
 // directly.
 //
-// 105 is the shipped default plus five, spelled as a literal because
-// internal/store must not import internal/api - that direction is the cycle.
+// overDefaultCap is a literal because internal/store must not import
+// internal/api - that direction is the cycle. Its job is to sit comfortably
+// above any plausible cap, so this plants more rows than the handler would ever
+// admit.
 func TestCreateScheduledJob_TheStoreDoesNotEnforceTheCap(t *testing.T) {
 	f := newCapFixture(t)
 	const overDefaultCap = 105

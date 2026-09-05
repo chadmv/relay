@@ -89,6 +89,13 @@ WHERE sj.owner_id = sqlc.arg(owner_id)::uuid
 -- the same reason. TestScheduleCapLock_WithoutTheLockBothTransactionsInsert is
 -- the control that shows the race is real.
 --
+-- READ COMMITTED IS A PREMISE THE CALLER HAS TO SUPPLY. Under REPEATABLE READ
+-- the snapshot is fixed at the transaction's first statement - this lock - so
+-- the count that follows cannot see the competitor at all and the cap is off
+-- with no error. handleCreateScheduledJob therefore pins the level on its own
+-- transaction rather than inheriting the server default;
+-- TestScheduleCap_HoldsWhenTheDatabaseDefaultsToRepeatableRead is the guard.
+--
 -- FOR NO KEY UPDATE, NOT FOR UPDATE, and there are two reasons. FOR UPDATE
 -- conflicts with FOR KEY SHARE, which is what any insert of a row referencing
 -- users(id) takes: it would block this same caller's concurrent POST /v1/jobs,
@@ -97,16 +104,26 @@ WHERE sj.owner_id = sqlc.arg(owner_id)::uuid
 -- up to BatchLimit scheduled_jobs rows locked. FOR NO KEY UPDATE conflicts with
 -- itself, which is all this needs.
 --
+-- IT IS A NEW COUPLING FOR THIS ROUTE, held to commit. Creating a schedule now
+-- waits on any in-flight UPDATE of the caller's own users row - password change,
+-- admin reset, archive and unarchive - and can sit there up to
+-- RELAY_DB_STATEMENT_TIMEOUT holding a pool connection, where before it touched
+-- users not at all. It is per principal and self-inflicted, so it is not a
+-- starvation primitive against anyone else.
+--
 -- LOCK ORDERING IS NOT THE ARGUMENT THAT SAVES THIS, so do not reason from it.
 -- handleAdminArchiveUser takes users then scheduled_jobs (ArchiveUser, then
 -- DisableScheduledJobsByOwner); schedrunner.TickOnce takes them in the OPPOSITE
 -- order (ListEligibleScheduledJobs FOR UPDATE, then users FOR KEY SHARE through
 -- the jobs.submitted_by FK). There is still no cycle, for two reasons that must
--- BOTH hold: this transaction's INSERT creates a new row under a
--- gen_random_uuid() primary key with no other unique constraint, so it waits on
--- no existing scheduled_jobs row and can never supply a cycle's second edge; and
--- the tick's FOR KEY SHARE does not conflict with FOR NO KEY UPDATE, so the tick
--- never waits on this transaction either. Both would be false under FOR UPDATE.
+-- BOTH hold. First, this transaction never waits on an EXISTING scheduled_jobs
+-- row: it only INSERTs, under a freshly allocated gen_random_uuid() key, so it
+-- can never supply a cycle's second edge - ADDING A UNIQUE CONSTRAINT to
+-- scheduled_jobs takes that away, because a colliding INSERT then blocks on
+-- whoever holds the duplicate key. Second, the tick's FOR KEY SHARE does not
+-- conflict with FOR NO KEY UPDATE, so the tick never waits on this transaction
+-- either; that half is a permanent fact of the lock matrix. Both would be false
+-- under FOR UPDATE.
 --
 -- pgx.ErrNoRows is unreachable while users are archived rather than deleted, and
 -- the caller handles it anyway so a future hard delete fails CLOSED instead of
@@ -128,9 +145,13 @@ SELECT id FROM users WHERE id = sqlc.arg(owner_id)::uuid FOR NO KEY UPDATE;
 -- Limit node below the aggregate, so the aggregate never counts past ceiling; but
 -- when it picks a sequential scan - which it does once one owner holds a large
 -- share of the table, the abuse case itself - the scan still reads until it finds
--- ceiling matches, and that distance is data-layout dependent. It is never worse
--- than the plain count, and on the index path it is flat in the owner's holdings.
--- idx_scheduled_jobs_owner serves this predicate; no new index.
+-- ceiling matches, and that distance is data-layout dependent. On the index path
+-- it is flat in the owner's holdings. It is NOT uniformly cheaper than the plain
+-- count: a Limit node blocks parallel aggregation, so at a ceiling large enough
+-- that nobody is ever refused it is slower than the count it replaces. Do not
+-- drop the LIMIT to reclaim that - the saturation below goes with it, and
+-- TestCreateScheduledJob_TheStoreDoesNotEnforceTheCap is what goes red. No new
+-- index.
 --
 -- THE RESULT SATURATES AT ceiling AND IS NEVER A CENSUS. Nothing may serve it,
 -- log it as a total, or feed it into handleScheduledJobStats, which has its own

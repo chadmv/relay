@@ -7,10 +7,9 @@ import (
 	"relay/internal/api"
 )
 
-// parseScheduleCap resolves RELAY_MAX_SCHEDULES_PER_OWNER. Same three-outcome
-// shape as parseAutoEnrollCeiling, parseConnLimit and parseWatchdogDuration, and
-// deliberately not a log.Fatalf: a typo must not stop a farm booting when a safe
-// default exists. The rate-limit family fatals; this is not in that family.
+// parseScheduleCap resolves RELAY_MAX_SCHEDULES_PER_OWNER. Deliberately not a
+// log.Fatalf: a typo must not stop a farm booting when a safe default exists.
+// The rate-limit family fatals; this is not in that family.
 //
 //   - Unset, or a valid integer >= 1: used as-is, silently.
 //   - 0, negative or unparseable: the default is used and the message names the

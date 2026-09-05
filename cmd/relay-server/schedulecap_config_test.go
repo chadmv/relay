@@ -17,9 +17,9 @@ import (
 // README says about what the parser refuses must be phrased as what this table
 // pins, never written from memory.
 //
-// THE ZERO ROW IS FIRST. A poisoned input placed after its target is read by
-// neither the code nor the mutant: with 0 last, a mutant that returns early on
-// the first row never reaches it.
+// THE ZERO ROW IS THE ONE THAT DISCRIMINATES: 0 is the value an operator would
+// reach for as an off switch, and a parser that accepted it would turn the cap
+// off while every other row here stayed green.
 func TestParseScheduleCap(t *testing.T) {
 	cases := []struct {
 		name    string

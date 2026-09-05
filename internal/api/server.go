@@ -127,8 +127,7 @@ type Server struct {
 	// MaxSchedulesPerOwner bounds how many scheduled_jobs rows one owner may
 	// hold. Set by cmd/relay-server's buildHTTPServer from
 	// RELAY_MAX_SCHEDULES_PER_OWNER. A NAMED FIELD, never another positional
-	// argument to New, whose tail is already four same-typed arguments in a row
-	// with a measured green transpose across them.
+	// argument to New, for the reason SearchLimitN above gives.
 	//
 	// Read it through maxSchedulesPerOwner(), never directly: a non-positive
 	// value folds to DefaultMaxSchedulesPerOwner, so a deleted or crossed wiring

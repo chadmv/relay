@@ -186,8 +186,16 @@ func (s *Server) handleCreateScheduledJob(w http.ResponseWriter, r *http.Request
 	// Putting the cap check ahead of it would turn a malformed-body flood into a
 	// lock-acquisition flood on the owner's users row and buy nothing: an invalid
 	// request cannot create a row whether the owner is at the cap or not.
+	//
+	// READ COMMITTED IS PINNED, NOT INHERITED. pool.Begin adopts the server's
+	// default_transaction_isolation, which an operator may set to REPEATABLE READ
+	// for reasons of their own. At that level a transaction's snapshot is fixed
+	// at its FIRST statement - the lock - so the loser blocks, acquires the lock,
+	// and then counts against a snapshot that predates the winner's row: the lock
+	// still works and the cap is off, with no error and no log line.
+	// TestScheduleCap_HoldsWhenTheDatabaseDefaultsToRepeatableRead is the guard.
 	ctx := r.Context()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "create scheduled job failed")
 		return
