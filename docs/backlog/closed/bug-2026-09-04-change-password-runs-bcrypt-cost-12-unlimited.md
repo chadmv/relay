@@ -1,7 +1,9 @@
 ---
 title: PUT /v1/users/me/password runs a cost-12 bcrypt compare on every request with no rate limit
 type: bug
-status: open
+status: closed
+closed: 2026-09-04
+resolution: fixed
 created: 2026-09-04
 priority: medium
 source: Security lens of the authenticated-route rate limiting slice (2026-09-04)
@@ -73,3 +75,31 @@ ceiling far above what a human needs.
   does not have, which would bound this from the other direction
 - `internal/api/server.go` (the route registration), `internal/api/auth.go`
   (`handleChangePassword`, `bcryptCost`)
+
+## Resolution
+
+Closed by PR #202 (`85e5e4c`). `RELAY_PASSWORD_CHANGE_RATE_LIMIT`, default `5:1m`, a per-user
+bucket on this route only, kept separate from the submit bucket for the reason this item gives.
+
+**This item's own repro was the weaker attack, and the correction killed its step 3.**
+`DeleteOtherTokensForUser` is `WHERE user_id = $1 AND id <> $2`, so the caller's own token survives
+a SUCCESSFUL change - an authenticated caller can loop successful changes forever on one token at
+two cost-12 operations each (a compare and a generate), not the one this item describes. A gate
+conditioned on recent failure, which is what step 3 proposed, would bound only the loop that
+produces failures. Step 3 was decided OUT on that basis; the middleware wrap refuses a burst before
+the compare runs, which is what the first acceptance bullet asks for.
+
+Measured, with its input: cost 12, 28-byte password, 50 individually timed iterations, Ryzen 9
+5900X, go1.26.2 windows/amd64 - compare 185.3 ms median, compare-plus-generate pair 368.9 ms. A
+review lens re-measured independently at 189.7 / 380.6. So "roughly a quarter second" slightly
+overstates one compare and substantially understates a successful change.
+
+`POST /v1/users/password-reset` and `POST /v1/users` also run cost-12 hashes and stay unbounded by
+decision: both are `AdminOnly`, so the set that can drive them is the admin table rather than
+anyone who can create an account. Recorded in README as a decision rather than an omission.
+
+Two defects the review found in the slice itself were closed before merge: a shipped test that
+passed with the route completely unwrapped, and a wiring guard that did not pin the `log.Fatalf`,
+leaving an operator typo able to boot an unarmed bucket silently. Two further findings were filed
+rather than fixed here - [[bug-2026-09-04-userratelimit-panics-on-a-zero-limit]] and
+[[idea-2026-09-04-nothing-enforces-one-handler-call-per-server]].
