@@ -49,5 +49,10 @@ not verified here" line still beats silence.
 ## Related
 - `internal/store/jobs_status_vocabulary_lockstep_test.go`; `internal/mcp/wait.go`
 - `python/src/relay/client.py` `_TERMINAL_JOB_STATUSES`; `python/src/relay/models.py` `EventType`
-- [[idea-2026-08-23-integration-only-guards-ci-never-runs]] - both Go guards are integration-tagged
-  and CI runs neither
+- [[idea-2026-09-04-nothing-guards-the-go-python-job-spec-type-pair]] - same class, different
+  subject: a struct's field set rather than a value vocabulary, and an arity assertion rather than a
+  registration line. Both need one answer to "how does a Go-side guard read Python", which is a
+  reason to schedule them together
+- [[idea-2026-08-23-integration-only-guards-ci-never-runs]] (closed 2026-09-04) - both Go guards are
+  integration-tagged, and both now run in CI's `pg-integration` job, so the lane half of this is no
+  longer a reason the registration would go unread
