@@ -10,27 +10,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestIntegration_SchedulesFailureCrossesTheWire is the ONE test covering
-// bug-2026-08-23-unfireable-schedule-is-invisible that RUNS IN CI.
-//
-// .github/workflows/go-ci.yml has a `cli-integration` job that runs
-// `make test-cli-integration` against a `services: postgres`, and
-// startRelayServer gives this file a real internal/api server over HTTP, a real
-// migrated database, and a raw pool. The headline test
-// (internal/api/scheduled_jobs_failure_visibility_integration_test.go) is
-// integration-tagged in internal/api and is in NEITHER CI job.
-//
-// WHAT THIS COVERS, END TO END, IN CI: the column exists ->
-// toScheduledJobResponse maps it -> the JSON key is spelled last_error ->
-// scheduleResp decodes it -> the CLI renders it. That whole chain is exactly
-// what a fixture-driven default-lane test cannot see, because a hand-written
-// fixture pins what a HUMAN believes the server sends, not what it sends.
+// TestIntegration_SchedulesFailureCrossesTheWire covers
+// bug-2026-08-23-unfireable-schedule-is-invisible's RESPONSE half: the column
+// exists -> toScheduledJobResponse maps it -> the JSON key is spelled
+// last_error -> scheduleResp decodes it -> the CLI renders it. That whole
+// chain is exactly what a fixture-driven default-lane test cannot see,
+// because a hand-written fixture pins what a HUMAN believes the server
+// sends, not what it sends.
 //
 // WHAT IT DOES NOT COVER: that the SCHEDRUNNER writes the record. This harness
 // deliberately does not wire schedrunner (see startRelayServer's own comment),
-// which is also why the planted row is stable for the length of the test. That
-// half is covered only by tests CI does not run. Do not report this file as
-// covering the fix; it covers the fix's RESPONSE half.
+// which is also why the planted row is stable for the length of the test.
+// internal/api/scheduled_jobs_failure_visibility_integration_test.go covers
+// that half, via a real TickOnce. Do not report this file as covering the
+// fix; it covers the fix's RESPONSE half.
 //
 // THE ROW IS PLANTED WITH SQL, and that is not a shortcut: POST and PATCH both
 // validate before storing, so no REST path can produce a last_error. The value
@@ -77,7 +70,7 @@ func TestIntegration_SchedulesFailureCrossesTheWire(t *testing.T) {
 	// last_error_at IS A SECOND KEY AND DRIFTS INDEPENDENTLY of last_error. It is
 	// mapped by a different branch of toScheduledJobResponse (pgtype.Timestamptz
 	// .Valid, not a *string nil check), so a test that asserted only the text
-	// would leave half the wire contract unpinned in the only lane CI runs.
+	// would leave half the wire contract unpinned here.
 	require.Contains(t, show, "Failed at: ",
 		"last_error_at must cross the wire too, and it is mapped by its own branch")
 	require.Contains(t, show, "relay schedules run-now "+scheduleID)

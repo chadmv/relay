@@ -23,55 +23,24 @@ import (
 // headline regression test for
 // docs/backlog/bug-2026-08-23-unfireable-schedule-is-invisible.md.
 //
-// ############ THE TESTS IN THIS FILE DO NOT RUN IN CI. ############
-//
-// .github/workflows/go-ci.yml runs `go test -race ./...` with NO TAGS and
-// `make test-cli-integration` (which names ./internal/cli/... only). This file
-// is //go:build integration in internal/api, so it is in neither job. It is not
-// a gate and must not be described as one; it runs when a human runs
-// `go test -tags integration -p 1 ./internal/api/...`, which needs Docker.
-//
-// That is a DECISION, recorded here in the form
-// docs/backlog/idea-2026-08-23-integration-only-guards-ci-never-runs.md's own
-// acceptance criteria allow ("a written decision in the test's own comment
-// saying why not"). Closing it properly means extending go-ci.yml's
-// `services: postgres` job to internal/api, which requires moving
-// newIntegrationDSN out of internal/cli's test files and converting
-// internal/api's harness to honour RELAY_TEST_DATABASE_URL - a refactor of that
-// item's own scope, on this one's critical path. That item is separately in Now
-// and already names internal/api as its sharpest instance.
-//
-// WHAT DOES RUN IN CI, and what each covers:
+// It asserts that a failure the SCHEDRUNNER records via a real TickOnce is
+// visible through the API on both GET and LIST, and that a later successful
+// tick clears last_error and last_error_at on both. Related coverage, each
+// with a different scope:
 //   - internal/api/scheduled_jobs_response_test.go (untagged): the wire
-//     contract. Field names, absent-not-zero, present-with-values, and the arity
-//     relationship between store.ScheduledJob and scheduledJobResponse. No
-//     database.
-//   - internal/schedrunner/failure_test.go (untagged): the classification (which
-//     failure classes are recordable) and the sanitize-and-truncate helper. No
-//     database.
-//   - internal/cli/schedules_failure_integration_test.go: runs under
-//     `make test-cli-integration`, which IS a CI job. It plants last_error with
-//     SQL and reads it back through a REAL internal/api server over HTTP, so it
-//     covers column -> handler -> JSON -> client in CI. (Slice C. If that slice
-//     is dropped, this bullet is false and must go with it.)
-//
-// WHAT NOTHING IN CI COVERS: that the SCHEDRUNNER writes the record at all.
-// That half needs a tick, and a tick needs Postgres.
-//
-// THIS FILE IS NO LONGER THE ONLY WITNESS TO THAT, and the correction is
-// recorded rather than quietly applied, because the claim was true when written
-// and went stale inside the same PR. The Phase 4 fix round added three more, all
-// in internal/schedrunner's own integration lane, which CI does not run either:
-// transient_preserves_failure_integration_test.go pins that TickOnce ROUTES on
-// the classification rather than merely computing it, and
-// startup_validation_fence_integration_test.go covers the sweep's fence and its
-// re-stamp idempotency. So the uncovered SURFACE is unchanged and the number of
-// witnesses to it is not.
-//
-// A uniqueness claim is a claim about the complement: it cannot be checked by
-// re-reading the file that makes it, only by searching for the shape elsewhere.
-// If you add another witness, correct this paragraph or delete the claim - do
-// not leave a sentence that says "only" next to four.
+//     contract - field names, absent-not-zero, present-with-values, and the
+//     arity relationship between store.ScheduledJob and scheduledJobResponse.
+//     No database.
+//   - internal/schedrunner/failure_test.go (untagged): the classification
+//     (which failure classes are recordable) and the sanitize-and-truncate
+//     helper. No database.
+//   - internal/cli/schedules_failure_integration_test.go: plants last_error
+//     with SQL and reads it back through a real internal/api server over
+//     HTTP, covering column -> handler -> JSON -> client.
+//   - internal/schedrunner/transient_preserves_failure_integration_test.go and
+//     startup_validation_fence_integration_test.go: that TickOnce ROUTES on
+//     the classification rather than merely computing it, and the sweep's
+//     fence and re-stamp idempotency.
 //
 // WHY internal/api RATHER THAN internal/schedrunner. The criterion requires
 // asserting the error is visible VIA THE API, which crosses two packages.

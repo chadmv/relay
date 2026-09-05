@@ -431,11 +431,12 @@ func TestConnect_ASuccessfulRegistrationPublishesTheWorkerAndKeepsItsGeneration(
 }
 
 // TestConnect_ARegistrationWhoseRegisterResponseSendFailsReleasesTheGeneration
-// is the arm that existed only behind //go:build integration
-// (TestRegisterWorker_SendFailureReleasesTheGeneration), which CI compiles and
-// never runs. That test STAYS: it carries the durable half this one cannot - a
-// real workers row, a real task, a real grace timer, a real requeue. This one
-// carries the half CI executes on every push.
+// is the default-lane sibling of
+// TestRegisterWorker_SendFailureReleasesTheGeneration
+// (handler_register_strand_integration_test.go), which needs Postgres. That
+// test STAYS: it carries the durable half this one cannot - a real workers
+// row, a real task, a real grace timer, a real requeue. This one carries the
+// half that needs no database.
 //
 // IT IS NOT RED AT HEAD AND IS NOT PRESENTED AS IF IT WERE. The behaviour it
 // covers shipped in the finishregister-strand slice; what this test adds is a

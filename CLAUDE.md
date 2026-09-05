@@ -21,12 +21,22 @@ make test-integration
 make test-cli-integration
 
 # The Postgres-only integration lanes: internal/store, internal/schedrunner,
-# cmd/relay-server, and internal/testsupport/pgdsn's own database-touching
-# self-test. Same two modes as test-cli-integration above. cmd/relay-server
-# qualifies because, like the other three, it takes its database from
-# internal/testsupport/pgdsn: its gRPC servers and its agent both run
-# in-process and its task subprocess is the test binary itself.
+# cmd/relay-server, internal/worker, internal/scheduler, internal/mcp, and
+# internal/testsupport/pgdsn's own database-touching self-test - plus
+# internal/agent, which needs no database at all and is here only because
+# this is one of three jobs that run integration-tagged tests on an ubuntu
+# runner, not because it needs the service.
+# Same two modes as test-cli-integration above. cmd/relay-server,
+# internal/worker, internal/scheduler and internal/mcp qualify because, like
+# internal/store and internal/schedrunner, they take their database from
+# internal/testsupport/pgdsn.
 make test-pg-integration
+
+# internal/api's own integration lane, separate from test-pg-integration
+# because internal/api alone runs near that target's whole combined cost.
+# Same two modes as test-cli-integration above (unset: one testcontainer;
+# RELAY_TEST_DATABASE_URL set: one CREATEd database per test).
+make test-api-integration
 
 # Regenerate sqlc store layer and protobuf bindings after editing .sql or .proto files
 make generate
@@ -58,8 +68,9 @@ go test ./internal/api/... -run TestRegister_HappyPath -v -timeout 30s
 
 # Run integration tests for one package
 go test -tags integration -p 1 ./internal/api/... -run TestRegister -v -timeout 120s
-# The whole internal/api integration package runs about 9.5 minutes; a 600s timeout is inside
-# its variance band and reports FAIL with no --- FAIL line beneath it. Use -timeout 1800s.
+# The whole internal/api integration package runs around 750s in container mode; a
+# 600s timeout is inside its variance band and reports FAIL with no --- FAIL line beneath
+# it. Use -timeout 1800s.
 ```
 
 Integration tests use `//go:build integration` and spin up real Postgres containers via testcontainers-go. On Windows the `desktop-linux` Docker context is used automatically.
@@ -126,9 +137,10 @@ commands you would use to check disagree by design.
 
 ### A guard behind a build tag must be able to run
 
-`.github/workflows/go-ci.yml` runs `go test -race ./...` with no tags, plus two `services:
-postgres` jobs (`cli-integration`, `pg-integration`). Every other `//go:build integration` test
-runs only when a human runs it. Before putting a guard behind the tag, ask in this order:
+`.github/workflows/go-ci.yml` runs `go test -race ./...` with no tags, plus three `services:
+postgres` jobs (`cli-integration`, `pg-integration`, `api-integration`). Every other
+`//go:build integration` test runs only when a human runs it. Before putting a guard behind the
+tag, ask in this order:
 
 1. **Does it need the tag at all?** A guard over a pure function does not. Move it to an untagged
    file in the same package and delete the export shim it needed. That closes the gap by deleting

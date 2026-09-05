@@ -693,8 +693,7 @@ func TestBuildHTTPServer_ServesTheWiredHandlersIngestSection(t *testing.T) {
 // and leaves this green. That question is executable only past Connect's message
 // loop, so it lives in
 // TestGRPCAdmissionEndToEnd_TheServedTaskLogFenceCountsAreTheServingHandlers,
-// which is INTEGRATION-tagged - go-ci runs `go test -race ./...` with no tag, so
-// CI compiles it and never runs it.
+// which needs Postgres and lives in this package's own integration lane.
 func TestBuildHTTPServer_ServesTheWiredHandlersTaskLogFenceSection(t *testing.T) {
 	h := worker.NewHandler(nil, nil, worker.NewRegistry(), events.NewBroker(), func() {})
 	srv := buildHTTPServer(httpServerDeps{

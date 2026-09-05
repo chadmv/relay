@@ -8,11 +8,10 @@ import (
 	"unicode/utf8"
 )
 
-// TestRecordableFailure is the DEFAULT-LANE sibling for the failure
-// classification, and it exists because the end-to-end proof
-// (internal/api/scheduled_jobs_failure_visibility_integration_test.go) is
-// integration-tagged and CI runs no tags. See that file's header for the full
-// decision.
+// TestRecordableFailure is the default-lane sibling for the failure
+// classification: it needs no database, unlike the end-to-end proof
+// (internal/api/scheduled_jobs_failure_visibility_integration_test.go), which
+// drives a real TickOnce against Postgres.
 //
 // THE TWO DISCRIMINATING CASES ARE FIRST AND SECOND, not last. A poisoned input
 // placed at the end of a table cannot distinguish a function that examined it

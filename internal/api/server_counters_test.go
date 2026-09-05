@@ -129,11 +129,11 @@ func TestServerCounters_WiredButZeroSectionIsStillPresent(t *testing.T) {
 
 // TestNewStampsStartedAt.
 //
-// Every other test in this file hand-builds &Server{startedAt: ...}, and the
-// only check of the PRODUCTION path was behind //go:build integration - which CI
-// does not run. Deleting `startedAt: time.Now().UTC()` from New builds clean and
-// leaves `go test ./internal/api/ ./cmd/relay-server/` green, and the endpoint
-// then reports 0001-01-01T00:00:00Z forever.
+// Every other test in this file hand-builds &Server{startedAt: ...}; this is
+// the one exercising the PRODUCTION path, New itself. Deleting
+// `startedAt: time.Now().UTC()` from New builds clean and leaves
+// `go test ./internal/api/ ./cmd/relay-server/` green, and the endpoint then
+// reports 0001-01-01T00:00:00Z forever.
 //
 // That is not a cosmetic field. started_at is the ONLY thing separating "the
 // counters stopped moving" from "the process restarted and zeroed them", so a

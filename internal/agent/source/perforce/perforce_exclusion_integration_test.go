@@ -40,8 +40,8 @@ func p4dEnv(t *testing.T) p4dHandle {
 
 // THIS TEST CANNOT RUN IN CI, AND THE GAP IS DELIBERATE.
 // .github/workflows/go-ci.yml runs `go test -race ./...` with no build tags plus
-// two `services: postgres` jobs; nothing there provides a p4d server or the `p4`
-// client binary. For this to join a CI lane there would have to be a workflow job
+// three `services: postgres` jobs; nothing there provides a p4d server or the
+// `p4` client binary. For this to join a CI lane there would have to be a workflow job
 // that (a) builds testdata/p4d or runs an equivalent service container, (b)
 // installs the Perforce CLI on the runner, and (c) is added to a Makefile
 // target's package list the way test-pg-integration hardcodes its own. Until

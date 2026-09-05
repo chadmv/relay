@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -23,9 +24,8 @@ import (
 // The three storability properties the coordinator must give an agent-supplied
 // message before it can become a task_logs row.
 //
-// UNTAGGED ON PURPOSE. These subtests touch no database, and the lane CI runs is
-// `go test -race ./...` with no build tag; behind //go:build integration this
-// guard compiles and never executes.
+// UNTAGGED ON PURPOSE. These subtests touch no database, so tagging them
+// integration would only move them onto a database they do not need.
 func TestSanitizeAgentErrorMessage_BoundsAndValidity(t *testing.T) {
 	t.Run("a short ascii message is unchanged", func(t *testing.T) {
 		require.Equal(t, "boom", sanitizeAgentErrorMessage("boom"))
@@ -83,6 +83,13 @@ type statusStubDB struct {
 	getTaskCalls atomic.Int64
 	appendCalls  atomic.Int64
 	updateCalls  atomic.Int64
+
+	// appendArgs captures the last AppendTaskLog call's positional arguments
+	// (TaskID, AssignmentEpoch, WorkerID, MinFinishedAt, Stream, Content), so a
+	// test can pin what was WRITTEN rather than only that a write happened. Not
+	// synchronised: green under -race today only because every caller drives
+	// this stub from a single goroutine.
+	appendArgs []any
 }
 
 func (d *statusStubDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
@@ -93,13 +100,14 @@ func (d *statusStubDB) Query(context.Context, string, ...any) (pgx.Rows, error) 
 	panic("statusStubDB: no Query is expected on this path")
 }
 
-func (d *statusStubDB) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
+func (d *statusStubDB) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
 	switch {
 	case strings.Contains(sql, "name: GetTask :one"):
 		d.getTaskCalls.Add(1)
 		return statusStubRow{task: &d.task}
 	case strings.Contains(sql, "name: AppendTaskLog :one"):
 		d.appendCalls.Add(1)
+		d.appendArgs = args
 		return statusStubRow{err: d.appendErr}
 	case strings.Contains(sql, "name: UpdateTaskStatus :one"):
 		d.updateCalls.Add(1)
@@ -177,6 +185,29 @@ func newStatusStubHandler(appendErr error) (*Handler, *statusStubDB) {
 	return &Handler{q: store.New(db), broker: events.NewBroker()}, db
 }
 
+// statusStubSubscribe tails statusStubTaskID's log events, mirroring
+// fenceSubscribe in tasklog_fence_counter_test.go. Subscribing is load-bearing
+// here for the same reason it is there: publishTaskLog's HasLogSubscriber
+// short-circuit means a chunk published with no subscriber is invisible, so
+// without this the publish assertion below would pass on a handler that never
+// publishes at all.
+func statusStubSubscribe(t *testing.T, h *Handler) func() []events.Event {
+	t.Helper()
+	ch, cancel := h.broker.Subscribe(events.Filter{TaskID: statusStubTaskID})
+	t.Cleanup(cancel)
+	return func() []events.Event {
+		var got []events.Event
+		for {
+			select {
+			case e := <-ch:
+				got = append(got, e)
+			default:
+				return got
+			}
+		}
+	}
+}
+
 func statusStubUpdate(msg string) *relayv1.TaskStatusUpdate {
 	return &relayv1.TaskStatusUpdate{
 		TaskId:       statusStubTaskID,
@@ -248,6 +279,32 @@ func TestHandleTaskStatus_ARealAppendFailureIsLoggedAndAFenceRejectionIsNot(t *t
 		assert.NotContains(t, logged(), "boom",
 			"the message is agent-supplied and can carry whatever a job's script echoed; never log it")
 	})
+}
+
+// AppendTaskLog's positional args are TaskID, AssignmentEpoch, WorkerID,
+// MinFinishedAt, Stream, Content (internal/store/tasks.sql.go), so Stream is
+// args[4] and Content is args[5]. Both are pinned in one assertion so a
+// transposition of the two reddens, and the publish leg is checked against
+// the same stream so a caller that replaces the constant at only one of
+// handler.go's two read sites still reddens.
+func TestHandleTaskStatus_ErrorMessageWritesAndPublishesTheDocumentedStream(t *testing.T) {
+	ctx := context.Background()
+	h, db := newStatusStubHandler(nil)
+	lim := newIngestLogLimiter(&h.ingestDrops)
+	published := statusStubSubscribe(t, h)
+
+	h.handleTaskStatus(ctx, statusStubWorkerID(), lim, statusStubUpdate("boom"))
+
+	require.Equal(t, int64(1), db.appendCalls.Load(), "fixture: the append must have happened")
+	require.Len(t, db.appendArgs, 6, "fixture: AppendTaskLog's positional arg count changed; update this stub and this test")
+	assert.Equal(t, "stderr", db.appendArgs[4], "args[4] is Stream")
+	assert.Equal(t, "[failed] boom\n", db.appendArgs[5], "args[5] is Content, pinned alongside Stream so a swap of the two reddens")
+
+	gotEvents := published()
+	require.Len(t, gotEvents, 1, "the success leg must publish exactly one task-log event")
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(gotEvents[0].Data, &got))
+	assert.Equal(t, "stderr", got["stream"], "the published event must carry the same stream the row was stored with")
 }
 
 // The status path's persist line must not be silenceable by the LOG path.

@@ -36,6 +36,15 @@ type p4dHandle struct {
 //   - Docker is not reachable on the host
 //
 // All other errors fail the test.
+//
+// NOT WIRED INTO ANY CI LANE, by decision rather than oversight. Running
+// these in CI needs a job with a Docker daemon, a `p4` client install step,
+// and a startup budget covering both the testdata/p4d image BUILD (not a
+// pull) and this function's own 2-minute wait.ForLog - cost this project has
+// not chosen to pay. Because both skip conditions above call t.Skip rather
+// than t.Fatal, adding this package to an existing lane without also
+// supplying both of those things produces a job that reports green having
+// run nothing.
 func startP4dContainer(t *testing.T) p4dHandle {
 	t.Helper()
 
