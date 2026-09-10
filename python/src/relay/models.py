@@ -127,10 +127,8 @@ class Sync(BaseModel):
 
     The rules checked here are the ones an entry can answer alone: a path is a
     depot path, and an excluded entry carries no revision while an included one
-    carries a recognised one. Every rule that needs the entry's SIBLINGS - that
-    it sits under the stream, that exactly one included path covers it, that it
-    does not swallow an include, and how many exclusions one spec may carry -
-    belongs to the server, which refuses the same spec on submission.
+    carries a recognised one. Every rule that needs the entry's SIBLINGS belongs
+    to the server, which refuses the same spec on submission.
     """
 
     model_config = ConfigDict(extra="forbid")

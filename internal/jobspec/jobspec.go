@@ -296,6 +296,31 @@ const maxCommandsPerTask = 500
 // to every bound in this file.
 const maxCommandsPerJob = 25000
 
+// maxSyncEntries bounds len(SourceSpec.Sync), counting includes and exclusions
+// together. A relay sync list names subtrees, not files: one stream root is the
+// common shape, a handful of named top-level directories is the next, and a
+// generated per-asset or per-shot list is the outer edge at low hundreds. A spec
+// wanting more is better served by naming a parent path. 512 is several times
+// that outer edge.
+//
+// IT COUNTS ENTRIES, NOT #head ENTRIES. The costs it bounds are driven by the
+// entry count, not by any rev; TestValidate_TheSyncEntryCountCountsEveryEntry
+// pins that axis.
+//
+// IT DOES NOT BOUND ARGV BYTES, AND IT DOES NOT NARROW THEM EITHER. SyncStream
+// passes one argv element per include to a single exec, and path length is bounded
+// by maxBodyBytes alone - before this bound one entry carrying a megabyte-long path
+// was legal, and after it 512 long paths still are. A 512-entry list of ordinary
+// depot paths already exceeds the tightest documented platform command-line limit,
+// so this cap sits ABOVE that ceiling and must not be read as protecting the sync
+// invocation. The exec fails rather than truncating, and it fails only after the
+// per-entry ResolveHead loop has already run.
+//
+// DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
+// Validate running on STORED scheduled_jobs.job_spec rows, and it applies
+// identically to every bound in this file.
+const maxSyncEntries = 512
+
 // maxSyncExclusions bounds how many entries of one source spec may set
 // `exclude`. Each one is an additional p4 subprocess inside the task's own
 // prepare phase and an additional operator-facing log line, on the same
@@ -305,9 +330,9 @@ const maxCommandsPerJob = 25000
 // named heavy subtrees; 16 is several times that.
 //
 // IT ALSO BOUNDS A QUADRATIC. The coverage and swallow rules in
-// validateSourceSpec compare every exclusion against every include, and the
-// include side is bounded only by maxBodyBytes. The count is therefore checked
-// BEFORE that loop runs, so an over-count spec is refused after one linear pass.
+// validateSourceSpec compare every exclusion against every include. The count is
+// therefore checked BEFORE that loop runs, so an over-count spec is refused
+// after one linear pass.
 //
 // DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
 // Validate running on STORED scheduled_jobs.job_spec rows, and it applies
@@ -549,6 +574,9 @@ func validateSourceSpec(s *SourceSpec) error {
 	}
 	if len(s.Sync) == 0 {
 		return errors.New("source.sync must have at least one sync entry")
+	}
+	if len(s.Sync) > maxSyncEntries {
+		return fmt.Errorf("at most %d sync entries are allowed, got %d", maxSyncEntries, len(s.Sync))
 	}
 	excluded := 0
 	for i, e := range s.Sync {

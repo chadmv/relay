@@ -151,6 +151,14 @@ func TestValidateJobSpec_Source_Perforce(t *testing.T) {
 		{"seventeen exclusions", func(s *JobSpec) {
 			s.Tasks[0].Source.Sync = manySyncExclusions(17)
 		}, "at most 16 excluded sync paths are allowed, got 17"},
+		// The other source count bound, reached through ValidateJobSpec's value
+		// parameter rather than jobspec.Validate's pointer.
+		{"five hundred and thirteen sync entries", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = manySyncIncludes(513)
+		}, "at most 512 sync entries are allowed, got 513"},
+		{"five hundred and twelve sync entries is allowed", func(s *JobSpec) {
+			s.Tasks[0].Source.Sync = manySyncIncludes(512)
+		}, ""},
 		// An exclusion is still a path under the stream. No new code enforces
 		// this - the existing per-entry containment check already runs for every
 		// entry - so the case pins that the exclusion branch did not skip past
@@ -192,6 +200,16 @@ func manySyncExclusions(n int) []SyncEntry {
 	out := []SyncEntry{{Path: "//streams/X/main/...", Rev: "#head"}}
 	for i := 0; i < n; i++ {
 		out = append(out, SyncEntry{Path: fmt.Sprintf("//streams/X/main/d%02d/...", i), Exclude: true})
+	}
+	return out
+}
+
+// manySyncIncludes returns n distinct, non-nesting include entries under the
+// table's stream, so the only rule an over-count case can trip is the count.
+func manySyncIncludes(n int) []SyncEntry {
+	out := make([]SyncEntry, n)
+	for i := range out {
+		out[i] = SyncEntry{Path: fmt.Sprintf("//streams/X/main/d%04d/...", i), Rev: "#head"}
 	}
 	return out
 }
