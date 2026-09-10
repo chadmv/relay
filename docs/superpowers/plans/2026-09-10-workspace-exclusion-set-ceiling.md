@@ -2137,15 +2137,51 @@ Fill this in, in the plan file:
 ```
 ## Mutation battery results
 
-Overlay proven live (deliberate syntax error -> compile error): <yes>
-Green baseline through the overlay: perforce <ok>; worker <ok>
-Control (row 1) died first: <yes - named tests: ...>
+Overlay proven live (deliberate syntax error -> compile error): yes. A stray "}" appended to
+the scratchpad copy produced `mut\exclusion_ceiling.go:221:1: syntax error`, naming the
+SCRATCHPAD path, which is what proves the overlay and not the worktree file was compiled.
+A compile error is not a kill and no row below is one.
+Green baseline through the overlay (all five files mapped, unmutated): perforce ok 1.247s;
+worker ok 3.742s.
+Control (row 1) died first: yes - TestProvider_AtTheCeilingAColdExclusionPrepareEvictsAndIsAdmitted,
+TestProvider_TheCeilingRefusesWhenEverySlotIsHeld, TestProvider_TheCeilingRefusalNamesNoOccupant,
+TestProvider_TheCeilingNeverEvictsTheStreamsBaseWorkspace.
+
+Every row: restored from an untouched pristine copy, mutated, diffed against pristine to confirm
+the intended edit was present and was the only one, then run. No row was reverted with
+`git checkout --`. Results are non-uniform across rows, which is what rules out a broken harness.
 
 | # | Result | Test that died, and which branch of it |
 |---|--------|----------------------------------------|
-| 1 | killed | ... |
-...
-Survivors: <none | #N - what that means and what was added>
+| 1 | killed | AtTheCeiling... on clientDeletes (zero deletes); TheCeilingRefuses... and RefusalNamesNoOccupant on require.Error; NeverEvictsTheBase... on the delete list |
+| 2 | killed | AWarmExclusionPrepareAtTheCeilingIsNotGated, on clientDeletes being non-empty: the hoisted check evicted 2 workspaces on a WARM prepare |
+| 3 | killed | ExcludesTheBaseWorkspaceAndOtherStreams (candidate list holds 2); NeverEvictsTheStreamsBaseWorkspace (the base row is gone) |
+| 4 | killed | ABareStreamIsNotAnExclusionKey at the `("//s/x","//s/x")` assertion - the named guard; plus IsExactAgainstAStreamContainingAPipe and four Provider tests |
+| 5 | killed | IsExactAgainstAStreamContainingAPipe only, on the inner-stream assertion. The suffix-only predicate counts the longer stream's key against the shorter one |
+| 6 | killed | AnUnsyncedEntryOutranksAnOlderSyncedOne only - the empty-baseline arm is the sole thing that test discriminates |
+| 7 | killed | AtTheCeiling... (no delete issued, so the refusal fires); NeverEvictsTheBase... same branch |
+| 8 | killed | AtTheCeiling... on require.NoError - the prepare is refused instead of evicting and admitting |
+| 9 | killed | TheCeilingRefusesWhenEverySlotIsHeld and TheCeilingRefusalNamesNoOccupant, both on require.Error |
+| 10 | killed | TestResolveMaxExclusionSets/zero_does_not_disable_it, on the returned value |
+| 11 | killed | TestResolveMaxExclusionSets/above_the_maximum_clamps, on the returned value |
+| 12 | killed | TestExclusionCeiling_AZeroFieldMeansTheDefault, on the zero-field row |
+| 13 | killed | TheCeilingRefusalNamesNoOccupant ONLY, on the injected marker appearing in the refusal |
+| 14 | killed | AtTheCeiling... ONLY, on its per-line short-id loop over the progress output |
+| 15 | killed | AnOverCountBatchIsTruncatedAndCommits (commits == 0) and both counter subtests |
+| 16 | killed | ABatchAtExactlyTheBoundDropsNothing - THE CONTROL - plus the over-count test's drop count |
+| 17 | killed | OverflowAndContentRefusalAreSeparateNumbers, including the both-at-once subtest |
+| 18 | killed | AnOverCountBatchIsTruncatedAndCommits on drops == 0, plus the counter subtests |
+| 19 | killed | TheCeilingRefusesWhenEverySlotIsHeld on the ARGV assertion. require.Error still passes, so the mint-absence check is the only thing that sees this |
+| 20 | killed | TheCeilingRefusesWhenEverySlotIsHeld on the DIRECTORY assertion. The argv is absent here too, so the directory check is the only thing that sees this |
+
+Survivors: none.
+
+Rows 19 and 20 are not in the plan's 18 and were added because the plan's own refutation 4
+required asserting both absences: each row proves one of the two assertions is load-bearing
+against a mutant the other cannot see, so neither is redundant.
+
+Worktree after the battery: `git status --porcelain` empty, `git diff --stat` empty, and all five
+touched files byte-identical to the pristine copies. No mutation leaked in.
 ```
 
 **A survivor is a finding, not a footnote.** For each one, either add the missing assertion and re-run, or record why the property is genuinely unpinnable and name it for the backlog.
