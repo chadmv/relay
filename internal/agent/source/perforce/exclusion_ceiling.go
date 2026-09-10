@@ -1,6 +1,7 @@
 package perforce
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sort"
@@ -121,4 +122,98 @@ func exclusionEvictionCandidates(snap []WorkspaceEntry, stream string) []Workspa
 		return out[i].LastUsedAt.Before(out[j].LastUsedAt)
 	})
 	return out
+}
+
+// admitExclusionWorkspace decides whether a COLD prepare may mint a new
+// exclusion-derived workspace for stream. It returns nil to admit.
+//
+// IT MUST RUN BEFORE ANYTHING IS MINTED, and that is positional rather than
+// incidental: the artifacts are the os.MkdirAll on the workspace root and
+// Client.CreateStreamClient, both downstream of Prepare's found/not-found
+// branch, and the first statement that can refuse a bogus exclusion is the
+// PathHasFiles probe, far downstream of both.
+//
+// IT IS CALLED FROM THE NOT-FOUND ARM ONLY. Hoisting it above that branch - or
+// putting it inside allocateShortID, where the found/not-found distinction is
+// invisible - gates every WARM prepare too, which denies the feature to specs
+// already using it instead of bounding new ones.
+// TestProvider_AWarmExclusionPrepareAtTheCeilingIsNotGated.
+//
+// THE BOUND IS NOT A HARD CEILING. The count here and the mint downstream are
+// not under one lock, so concurrent cold prepares for distinct new keys on one
+// stream can all pass: the honest statement is ceiling + concurrent prepares on
+// that stream - 1. That overshoot is bounded by the agent's slot configuration,
+// which is the operator's and not the job author's, and closing it would add a
+// reservation lifecycle with a leak-on-early-return failure mode.
+//
+// EVICTION GOES THROUGH Provider.EvictWorkspace AND NOTHING HERE DELETES. That
+// call is the canonical twin of ReserveForEvict; a third copy of the holder
+// check and the p.evicting reservation is the defect this avoids. It also means
+// a candidate that becomes held between selection and eviction is refused there,
+// so this function needs no holder test of its own.
+//
+// progress IS CALLED HERE BECAUSE NOTHING IS HELD HERE. It can park until agent
+// shutdown, and this runs before Prepare's p.mu block and well before
+// ws.Acquire, so there is no handle and no lock for it to strand.
+func (p *Provider) admitExclusionWorkspace(
+	ctx context.Context, reg *Registry, sourceKey, stream string, progress func(string),
+) error {
+	if !isExclusionKeyForStream(sourceKey, stream) {
+		return nil
+	}
+	ceiling := p.exclusionCeiling()
+	candidates := exclusionEvictionCandidates(reg.Snapshot(), stream)
+	count := len(candidates)
+	if count < ceiling {
+		return nil
+	}
+
+	// At most one attempt per slot, which bounds ONE prepare's p4 client -d
+	// calls: each is bounded only by RELAY_EVICTION_TIMEOUT, so an unbounded
+	// series of them would let a single prepare stall for an arbitrary multiple
+	// of it. This is a bound on work per prepare and NOT a convergence claim - a
+	// registry far over the ceiling takes several prepares to come back under it.
+	attempts := ceiling
+	reclaimed := 0
+	for _, c := range candidates {
+		if count < ceiling || attempts <= 0 {
+			break
+		}
+		attempts--
+		if err := p.EvictWorkspace(ctx, c.ShortID); err != nil {
+			// Held, already evicting, or a p4 or disk fault. Try the next slot.
+			log.Printf("perforce: exclusion ceiling: evict %s: %v", c.ShortID, err)
+			continue
+		}
+		log.Printf("perforce: exclusion ceiling: reclaimed %s", c.ShortID)
+		reclaimed++
+		count--
+	}
+
+	if reclaimed > 0 {
+		// THE COUNT ONLY. GET /v1/tasks/{id}/logs is authenticated but not
+		// admin-only and carries no per-owner gate, so anything on this line is
+		// readable by any authenticated user - and a short id is derived from
+		// another job author's exclusion set. The ids go to the agent's own log
+		// above, where the reader already has host access.
+		progress(fmt.Sprintf("[workspace] reclaimed %d exclusion workspace(s) for this stream",
+			reclaimed))
+	}
+	if count >= ceiling {
+		// NO OCCUPANT IS NAMED, for the reason the progress line gives: naming the
+		// occupying workspaces would make this refusal a disclosure oracle for
+		// another tenant's exclusion sets. The stream is the caller's own and is
+		// rendered %q and LAST, per syncSummary's rule, so a forged path cannot
+		// spell a convincing line of its own.
+		//
+		// It says none COULD be reclaimed rather than that all are in use: a
+		// failed eviction can also be a p4 or disk fault, and a refusal that
+		// asserted the wrong cause would send the operator after the wrong thing.
+		return fmt.Errorf("exclusion workspace ceiling reached: this agent holds %d of at most %d "+
+			"exclusion-derived workspaces for this stream and none could be reclaimed, which "+
+			"normally means a running task holds every one; retry the task, or raise %s on the "+
+			"agent. Stream %q",
+			count, ceiling, maxExclusionSetsEnv, stream)
+	}
+	return nil
 }

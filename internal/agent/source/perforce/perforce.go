@@ -305,6 +305,15 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	if found {
 		shortID = existing.ShortID
 	} else {
+		// COLD ONLY, and the placement is the control. See
+		// admitExclusionWorkspace: above this branch, or inside allocateShortID
+		// where the found/not-found distinction is invisible, every warm prepare
+		// is gated too. It holds no workspace handle and no lock here, so a
+		// refusal has nothing to release.
+		// TestProvider_AWarmExclusionPrepareAtTheCeilingIsNotGated.
+		if err := p.admitExclusionWorkspace(ctx, reg, sourceKey, pf.GetStream(), progress); err != nil {
+			return nil, err
+		}
 		shortID = allocateShortID(sourceKey, reg)
 	}
 	wsRoot := filepath.Join(p.cfg.Root, shortID)
