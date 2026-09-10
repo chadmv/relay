@@ -306,6 +306,15 @@ const maxCommandsPerJob = 25000
 // IT IS THE OTHER END OF AN EXISTING RANGE. validateSourceSpec already refuses
 // an empty sync list, and this is that sentence's upper end.
 //
+// IT STILL BINDS, ON BOTH AXES. maxBodyBytes (1 MiB, internal/api/server.go)
+// caps how many entries one request can carry, and it sits far above this
+// bound. The cheapest entry the decoder accepts is 25 bytes and 41938 of them
+// fit one body, so on the ENTRY COUNT this cap is roughly an 82x reduction. The
+// cheapest entry that also costs a p4 round trip is 28 bytes and 37445 fit, so
+// on the ROUND TRIPS it is roughly 73x. THE TWO MUST NOT BE COLLAPSED: they are
+// different entry shapes bounding different costs, and the cheaper one pins its
+// revision rather than spelling #head.
+//
 // EVERY COST IT BOUNDS IS DRIVEN BY THE ENTRY COUNT, NOT BY ANY rev: one
 // ResolveHead round trip per #head entry inside the task's own prepare phase,
 // repeated on every attempt; one argv element per include on the single p4 sync;
