@@ -429,6 +429,21 @@ type Handler struct {
 	// through EnrollmentRefusals. NOT YET ON GET /v1/server/counters - the section
 	// is deliberately deferred to its own item; see the plan's scope decision.
 	enrollmentRefusals enrollmentRefusalCounters
+
+	// inventoryRowRejects counts the workspace-inventory rows inventoryUpsertParams
+	// refused: over a column's byte bound, carrying a NUL, or with a last_used_at
+	// that cannot be stored. A VALUE, not a pointer, for the same reason its
+	// neighbours are: the zero value works, so a bare &Handler{} in a test has a
+	// working counter and there is no nil case anywhere. Read through
+	// InventoryRowRejections.
+	//
+	// A DISTINCT NOUN, and no input moves more than one of these counters. It
+	// counts ROWS REFUSED FOR CONTENT and nothing else - an accepted row moves it
+	// by zero, which is what
+	// TestInventoryRowRejections_CountsRefusalsAndNothingElse's second half pins.
+	// NOT YET ON GET /v1/server/counters - the section is deliberately deferred to
+	// its own item.
+	inventoryRowRejects atomic.Uint64
 }
 
 // IngestLogDropCounts reports what this server's ingest log budget has dropped
@@ -467,6 +482,17 @@ func (h *Handler) EnrollmentRefusals() EnrollmentRefusalCounts { return h.enroll
 func (h *Handler) TaskStatusFenceRejections() TaskStatusFenceCounts {
 	return h.statusFence.snapshot()
 }
+
+// InventoryRowRejections reports how many agent-reported workspace-inventory rows
+// this server refused as unstorable since process start, across every worker.
+//
+// AN AUTHENTICATED AGENT MOVES THIS NUMBER AT WILL, one increment per inventory
+// entry per message, and this is the sentence to read before acting on it. It is
+// attributable to "some agent" and no further. THE REMEDY IS TO FIND WHICH AGENT
+// IS SENDING MALFORMED INVENTORY - never to raise a bound, which is what an agent
+// driving this number would want. Per PROCESS, monotonic, zeroed by a restart,
+// and never returned to an agent.
+func (h *Handler) InventoryRowRejections() uint64 { return h.inventoryRowRejects.Load() }
 
 // NewHandler returns a Handler wired to the given dependencies. pool is a
 // txBeginner, which *pgxpool.Pool satisfies; see that type for why.
@@ -2207,6 +2233,7 @@ func (h *Handler) applyInventory(ctx context.Context, workerID pgtype.UUID, inv 
 			}
 			p, err := inventoryUpsertParams(workerID, u)
 			if err != nil {
+				h.inventoryRowRejects.Add(1)
 				// DROP THE ROW, DO NOT FAIL THE BATCH. Returning here rolls
 				// ReplaceWorkerInventory's DELETE back with everything else, so the
 				// worker keeps the rows it had and an agent that reports the same bad
@@ -2223,22 +2250,30 @@ func (h *Handler) applyInventory(ctx context.Context, workerID pgtype.UUID, inv 
 	})
 }
 
-// applyInventoryUpdate upserts or deletes a single workspace inventory row.
+// applyInventoryUpdate upserts or deletes a single workspace inventory row. The
+// upsert arm goes through inventoryUpsertParams; a refused row issues no
+// statement and returns errUnstorableInventoryRow, which the caller uses to tell
+// a refusal from a store fault.
 func (h *Handler) applyInventoryUpdate(ctx context.Context, workerID pgtype.UUID, u *relayv1.WorkspaceInventoryUpdate) error {
 	if u.Deleted {
+		// NO CONSTRUCTOR ON THIS ARM, AND THAT IS A DECISION RATHER THAN AN
+		// OVERSIGHT. A DELETE binds these values as COMPARISON keys, never as an
+		// index tuple, so the hazard the constructor closes is absent here. Refusing
+		// an over-long delete would additionally make any row stored before the bound
+		// existed agent-undeletable, because the admin evict path deletes a row only
+		// by way of the agent's confirming update; such rows are cleared by the next
+		// ReplaceWorkerInventory instead, which every reconnect runs. Pinned by
+		// TestApplyInventoryUpdate_TheDeleteArmHasNoBound.
 		return h.q.DeleteWorkerWorkspace(ctx, store.DeleteWorkerWorkspaceParams{
 			WorkerID: workerID, SourceType: u.SourceType, SourceKey: u.SourceKey,
 		})
 	}
-	ts, _ := time.Parse(time.RFC3339, u.LastUsedAt)
-	return h.q.UpsertWorkerWorkspace(ctx, store.UpsertWorkerWorkspaceParams{
-		WorkerID:     workerID,
-		SourceType:   u.SourceType,
-		SourceKey:    u.SourceKey,
-		ShortID:      u.ShortId,
-		BaselineHash: u.BaselineHash,
-		LastUsedAt:   pgtype.Timestamptz{Time: ts, Valid: !ts.IsZero()},
-	})
+	p, err := inventoryUpsertParams(workerID, u)
+	if err != nil {
+		h.inventoryRowRejects.Add(1)
+		return err
+	}
+	return h.q.UpsertWorkerWorkspace(ctx, p)
 }
 
 // handleInventoryUpdate applies one workspace inventory update and reports a

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -146,4 +147,99 @@ func TestApplyInventory_EveryRefusedRowIsDroppedAndTheBatchStillCommits(t *testi
 			assert.Equal(t, 1, commits, "and the batch must have committed")
 		})
 	}
+}
+
+// TestInventoryRowRejections_CountsRefusalsAndNothingElse has two halves and the
+// SECOND is the control. Without it the test is satisfied just as well by an
+// increment placed in the accept branch, or in both - and a counter that also
+// counts accepted rows is not attributable to anything.
+func TestInventoryRowRejections_CountsRefusalsAndNothingElse(t *testing.T) {
+	t.Run("two refused rows move it by exactly two", func(t *testing.T) {
+		h, _ := newInventoryFixture(t)
+		before := h.InventoryRowRejections()
+
+		bad1 := &relayv1.WorkspaceInventoryUpdate{
+			SourceType: "st-perforce", SourceKey: strings.Repeat("Q", overLongKey), ShortId: "shid-b1",
+			BaselineHash: "bh-b1", LastUsedAt: "2026-09-10T12:00:00Z",
+		}
+		bad2 := &relayv1.WorkspaceInventoryUpdate{
+			SourceType: "st-perforce", SourceKey: "//sk/b2", ShortId: "shid-b2",
+			BaselineHash: "bh-b2", LastUsedAt: "not a timestamp",
+		}
+		good := &relayv1.WorkspaceInventoryUpdate{
+			SourceType: "st-perforce", SourceKey: "//good/counted", ShortId: "shid-c",
+			BaselineHash: "bh-c", LastUsedAt: "2026-09-10T12:00:01Z",
+		}
+
+		require.NoError(t, h.applyInventory(context.Background(), testWorkerID,
+			[]*relayv1.WorkspaceInventoryUpdate{bad1, bad2, good}))
+		assert.Equal(t, before+2, h.InventoryRowRejections(),
+			"one per REFUSED row, and the accepted row in the same batch must add nothing")
+	})
+
+	t.Run("an accepted batch moves it by zero", func(t *testing.T) {
+		h, _ := newInventoryFixture(t)
+		before := h.InventoryRowRejections()
+
+		good1 := &relayv1.WorkspaceInventoryUpdate{
+			SourceType: "st-perforce", SourceKey: "//good/alpha", ShortId: "shid-a",
+			BaselineHash: "bh-a", LastUsedAt: "2026-09-10T12:00:00Z",
+		}
+		good2 := &relayv1.WorkspaceInventoryUpdate{
+			SourceType: "st-perforce", SourceKey: "//good/beta", ShortId: "shid-b",
+			BaselineHash: "bh-b", LastUsedAt: "2026-09-10T12:00:01Z",
+		}
+
+		require.NoError(t, h.applyInventory(context.Background(), testWorkerID,
+			[]*relayv1.WorkspaceInventoryUpdate{good1, good2}))
+		assert.Equal(t, before, h.InventoryRowRejections(),
+			"THE CONTROL. An increment in the accept branch, or outside the branch entirely, "+
+				"passes the first half of this test and dies here.")
+	})
+}
+
+// TestApplyInventoryUpdate_ARefusedRowIssuesNoStatement is the single-message
+// path. ZERO STATEMENTS is the assertion that matters: "returned an error" is
+// also what a fixture whose Exec errors produces, which would prove the refusal
+// happened at the database rather than ahead of it.
+func TestApplyInventoryUpdate_ARefusedRowIssuesNoStatement(t *testing.T) {
+	db := &strandDB{execTag: "INSERT 1"}
+	h := &Handler{q: store.New(db)}
+	before := h.InventoryRowRejections()
+
+	u := &relayv1.WorkspaceInventoryUpdate{
+		SourceType: "st-perforce", SourceKey: strings.Repeat("Q", overLongKey), ShortId: "shid-x",
+		BaselineHash: "bh-x", LastUsedAt: "2026-09-10T12:00:00Z",
+	}
+	err := h.applyInventoryUpdate(context.Background(), testWorkerID, u)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errUnstorableInventoryRow),
+		"handleInventoryUpdate branches on this sentinel to decide whether to spend a log token")
+	assert.Empty(t, db.execsSeen(),
+		"the refusal must happen AHEAD of the statement, not at the database")
+	assert.Equal(t, before+1, h.InventoryRowRejections())
+}
+
+// TestApplyInventoryUpdate_TheDeleteArmHasNoBound pins that the delete arm is
+// deliberately ungated. A DELETE binds these values as COMPARISON keys, never as
+// an index tuple, so the hazard the constructor closes is absent there; and
+// refusing an over-long delete would make any row stored before the bound existed
+// agent-undeletable, because the admin evict path deletes a row only by way of
+// the agent's confirming update.
+func TestApplyInventoryUpdate_TheDeleteArmHasNoBound(t *testing.T) {
+	db := &strandDB{execTag: "DELETE 1"}
+	h := &Handler{q: store.New(db)}
+
+	key := strings.Repeat("Q", overLongKey)
+	require.NoError(t, h.applyInventoryUpdate(context.Background(), testWorkerID,
+		&relayv1.WorkspaceInventoryUpdate{
+			SourceType: "st-perforce", SourceKey: key, Deleted: true,
+		}))
+
+	execs := db.execsSeen()
+	require.Len(t, execs, 1, "the DELETE must have been issued, not refused")
+	assert.Contains(t, execs[0].sql, "DELETE FROM worker_workspaces")
+	assert.Equal(t, key, execs[0].args[2], "and with the over-long key bound whole")
+	assert.Equal(t, uint64(0), h.InventoryRowRejections(),
+		"a delete is not a refusal: it must not move the counter")
 }
