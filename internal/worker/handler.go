@@ -2301,6 +2301,12 @@ func (h *Handler) handleInventoryUpdate(ctx context.Context, workerID pgtype.UUI
 	if err == nil {
 		return
 	}
+	// A REFUSED ROW IS COUNTED, NEVER LOGGED. It is fully agent-chosen and
+	// unboundedly repeatable, so a token spent here is one this connection's other
+	// diagnostics no longer have. InventoryRowRejections is the signal.
+	if errors.Is(err, errUnstorableInventoryRow) {
+		return
+	}
 	if lim.allow(logKey{kind: kindInventory}) {
 		log.Printf("worker: inventory update failed: %v", err)
 	}

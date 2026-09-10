@@ -1,11 +1,13 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
 	relayv1 "relay/internal/proto/relayv1"
+	"relay/internal/store"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
@@ -209,4 +211,48 @@ func TestInventoryUpsertParams_LastUsedAtMustParseAndBeNonZero(t *testing.T) {
 			"Valid false is SQL NULL, which is what the NOT NULL column refuses")
 		assert.Equal(t, 2026, p.LastUsedAt.Time.Year())
 	})
+}
+
+// TestHandleInventoryUpdate_ARefusedRowSpendsNoLogBudget pins "count it, do not
+// log it" STRUCTURALLY rather than by convention. The refusal is fully
+// agent-chosen and unboundedly repeatable, so a token spent here is a token the
+// same connection's task-log and status diagnostics no longer have.
+//
+// The frozen clock is what makes the token count exact rather than wall-clock
+// dependent.
+func TestHandleInventoryUpdate_ARefusedRowSpendsNoLogBudget(t *testing.T) {
+	lim, _ := newFrozen()
+	before := lim.tokens
+
+	h := &Handler{q: store.New(&strandDB{execTag: "INSERT 1"})}
+	u := &relayv1.WorkspaceInventoryUpdate{
+		SourceType: "st-perforce", SourceKey: strings.Repeat("Q", overLongKey), ShortId: "shid-y",
+		BaselineHash: "bh-y", LastUsedAt: "2026-09-10T12:00:00Z",
+	}
+	h.handleInventoryUpdate(context.Background(), testWorkerID, lim, u)
+
+	assert.Equal(t, before, lim.tokens,
+		"a refused row must cost the connection's budget NOTHING; it is counted by "+
+			"InventoryRowRejections instead")
+	assert.Equal(t, uint64(1), h.InventoryRowRejections(),
+		"and it must actually have been refused - without this the test passes just as "+
+			"well against a build where nothing reached the constructor")
+}
+
+// TestHandleInventoryUpdate_AStoreFaultStillSpendsABudgetToken is the control. A
+// store fault is NOT peer-chosen, and it is the condition the budgeted line
+// exists for; suppressing it along with the refusals would make an infrastructure
+// failure silent.
+func TestHandleInventoryUpdate_AStoreFaultStillSpendsABudgetToken(t *testing.T) {
+	lim, _ := newFrozen()
+	before := lim.tokens
+
+	db := &strandDB{execErr: errors.New("ERROR: connection reset (SQLSTATE 08006)")}
+	h := &Handler{q: store.New(db)}
+	h.handleInventoryUpdate(context.Background(), testWorkerID, lim, legalUpdate())
+
+	assert.Equal(t, before-1, lim.tokens,
+		"exactly one token, which is what the budget is for")
+	assert.Equal(t, uint64(0), h.InventoryRowRejections(),
+		"and a store fault is not a refusal: the two nouns must not merge")
 }
