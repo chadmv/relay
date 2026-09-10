@@ -1,10 +1,12 @@
 ---
 title: applyInventory converts an unparseable last_used_at to SQL NULL against a NOT NULL column, silently freezing the worker's inventory
 type: bug
-status: open
+status: closed
 created: 2026-08-23
 priority: medium
 source: 2026-08-23 deep roadmap refresh - backend invariants lens finding N5
+closed: 2026-09-10
+resolution: fixed
 ---
 
 # applyInventory converts an unparseable last_used_at to SQL NULL against a NOT NULL column, silently freezing the worker's inventory
@@ -50,6 +52,38 @@ committable. Fix both `applyInventory` and `applyInventoryUpdate`; correct the c
   interface, so a `fakeTx.Exec` returning a NOT NULL violation reproduces this without
   Postgres - `TestFinishRegister_SucceedsWhenTheInventoryTransactionFails` in
   `internal/worker/handler_register_success_test.go` already injects exactly that error
-  for a different purpose. **This item is not fixed and stays open.**
+  for a different purpose.
 - Its line citations have drifted: `applyInventory` is at `internal/worker/handler.go:1770-1794`,
   not `:1387-1411`.
+
+## Resolution
+
+Fixed in PR #209, squashed as `ef86c877`, as a consequence of the slice that closed
+[[idea-2026-09-04-worker-workspaces-source-key-is-unbounded-in-a-primary-key]]. The two are the same
+mechanism on different columns: one malformed inventory row must not poison the whole batch.
+
+All three Done-When criteria are satisfied. `inventoryUpsertParams`
+(`internal/worker/inventory_params.go`) refuses an unstorable `last_used_at` BEFORE any statement runs,
+`applyInventory` drops that row and continues, and the batch still commits - so the rest of the
+inventory lands. Both the replace path and the streaming-update path route through the same constructor,
+so they share one test shape. The "blank -> zero time" comment is gone.
+
+**The parse alone is not the check, and that is why there are two arms.** An unparseable value yields
+the zero `time.Time`, which binds as SQL NULL against a `TIMESTAMPTZ NOT NULL` column - but a zero
+`time.Time` also FORMATS as the year-one RFC3339 instant, which parses cleanly. So a value that got past
+the parse can still be NULL by the time it is bound, and both `time.Parse` failing and `ts.IsZero()` are
+refused separately.
+
+`time.Parse`'s own error message echoes its input, so it is deliberately not wrapped: the returned error
+carries a column name and a compile-time bound and nothing agent-supplied. That matters because
+`handleInventoryUpdate`'s existing rule is never to log the update itself.
+
+This item's Amendment asserted in the present tense that it was not fixed. That sentence was deleted
+rather than rewritten, since a correction in place is what regenerates this class of defect on this
+project. The amendment's other content - that the regression is reproducible in the default lane
+through the `txBeginner` seam - held, and is what made the drop-versus-rollback distinction testable
+without Postgres.
+
+Concretely reachable before the fix: a legacy or hand-edited `registry.json` with a missing
+`last_used_at` unmarshals to the zero `time.Time`, the agent formats it as `0001-01-01T00:00:00Z`, and
+the whole inventory replace aborted. Now that one row is dropped and counted.
