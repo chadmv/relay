@@ -2190,8 +2190,11 @@ func updateJobStatusFromTasks(ctx context.Context, q *store.Queries, jobID pgtyp
 	return status
 }
 
-// applyInventory does a transactional full-replace of workspace inventory for
-// a worker: deletes all existing rows, then inserts each non-deleted entry.
+// applyInventory does a transactional full-replace of workspace inventory for a
+// worker: deletes all existing rows, then inserts each non-deleted entry that
+// inventoryUpsertParams accepts. A refused entry is dropped from the batch and
+// the rest still commit; the error this returns is a store fault and nothing
+// else, which is what finishRegister's log-and-continue call site is for.
 func (h *Handler) applyInventory(ctx context.Context, workerID pgtype.UUID, inv []*relayv1.WorkspaceInventoryUpdate) error {
 	return pgx.BeginTxFunc(ctx, h.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		q := h.q.WithTx(tx)
@@ -2202,15 +2205,17 @@ func (h *Handler) applyInventory(ctx context.Context, workerID pgtype.UUID, inv 
 			if u.Deleted {
 				continue
 			}
-			ts, _ := time.Parse(time.RFC3339, u.LastUsedAt) // blank → zero time
-			if err := q.UpsertWorkerWorkspace(ctx, store.UpsertWorkerWorkspaceParams{
-				WorkerID:     workerID,
-				SourceType:   u.SourceType,
-				SourceKey:    u.SourceKey,
-				ShortID:      u.ShortId,
-				BaselineHash: u.BaselineHash,
-				LastUsedAt:   pgtype.Timestamptz{Time: ts, Valid: !ts.IsZero()},
-			}); err != nil {
+			p, err := inventoryUpsertParams(workerID, u)
+			if err != nil {
+				// DROP THE ROW, DO NOT FAIL THE BATCH. Returning here rolls
+				// ReplaceWorkerInventory's DELETE back with everything else, so the
+				// worker keeps the rows it had and an agent that reports the same bad
+				// row on every registration never updates its inventory again. The
+				// dropped workspace is invisible to the dispatcher's warm scoring, and
+				// that degradation is bounded to that one workspace.
+				continue
+			}
+			if err := q.UpsertWorkerWorkspace(ctx, p); err != nil {
 				return err
 			}
 		}
