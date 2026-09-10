@@ -492,6 +492,9 @@ func (h *Handler) TaskStatusFenceRejections() TaskStatusFenceCounts {
 // IS SENDING MALFORMED INVENTORY - never to raise a bound, which is what an agent
 // driving this number would want. Per PROCESS, monotonic, zeroed by a restart,
 // and never returned to an agent.
+//
+// NOTHING READS IT YET, so that remedy is guidance for whoever wires it up
+// rather than something an operator can act on today; see the field above.
 func (h *Handler) InventoryRowRejections() uint64 { return h.inventoryRowRejects.Load() }
 
 // NewHandler returns a Handler wired to the given dependencies. pool is a

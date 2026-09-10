@@ -47,8 +47,8 @@ const (
 var errUnstorableInventoryRow = errors.New("inventory row is not storable")
 
 // inventoryUpsertParams builds the params UpsertWorkerWorkspace binds, or refuses
-// the row. Both of this package's writers go through it, so the policy about what
-// is storable lives at one function rather than at each call site.
+// the row. It is the one place this package decides what is storable, so the
+// policy lives at one function rather than at each call site.
 //
 // IT REFUSES; IT NEVER TRANSFORMS, which is why sanitizeAgentErrorMessage
 // (handler.go) is deliberately not reused here. That value is human-readable
