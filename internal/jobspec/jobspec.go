@@ -296,6 +296,46 @@ const maxCommandsPerTask = 500
 // to every bound in this file.
 const maxCommandsPerJob = 25000
 
+// maxSyncEntries bounds len(SourceSpec.Sync), counting includes and exclusions
+// together. A relay sync list names subtrees, not files: one stream root is the
+// common shape, a handful of named top-level directories is the next, and a
+// generated per-asset or per-shot list is the outer edge at low hundreds. A spec
+// wanting more is better served by naming a parent path. 512 is several times
+// that outer edge.
+//
+// IT IS THE OTHER END OF AN EXISTING RANGE. validateSourceSpec already refuses
+// an empty sync list, and this is that sentence's upper end.
+//
+// EVERY COST IT BOUNDS IS DRIVEN BY THE ENTRY COUNT, NOT BY ANY rev: one
+// ResolveHead round trip per #head entry inside the task's own prepare phase,
+// repeated on every attempt; one argv element per include on the single p4 sync;
+// the second factor of the O(exclusions x len(Sync)) coverage and swallow loops
+// below, which perforce.preemptSpecs walks again; and one BaselineHash per
+// prepare and one per candidate worker scored by scheduler.selectWorker. A bound
+// on the #head subset would leave all but the first of those open.
+//
+// IT DOES NOT BOUND ARGV BYTES. Path length is bounded by maxBodyBytes alone, so
+// 512 long client paths is still a large command line and platform command-line
+// limits are real. That is a pre-existing hazard this narrows and does not close.
+//
+// CHECKED BEFORE THE PER-ENTRY LOOP, so an over-count spec is refused without
+// paying three prefix checks, a control-byte scan and up to four regexp matches
+// per entry, and without the quadratic below. That places it above the
+// excluded-count check, which needs the count that loop produces; a spec over
+// both bounds therefore reports the entry count, which is the number knowable
+// without work and the more actionable of the two.
+//
+// DO NOT RAISE THIS WITHOUT A REFUSED REAL SUBMISSION. "The number looks small"
+// is not the reason. And 512 is deliberately not 500: maxCommandsPerTask above
+// is the other concentration control on this quantity, the two are independent -
+// one counts commands the agent executes, the other counts p4 round trips before
+// any command runs - and a cap spelled identically would read as derived from it.
+//
+// DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
+// Validate running on STORED scheduled_jobs.job_spec rows, and it applies
+// identically to every bound in this file.
+const maxSyncEntries = 512
+
 // maxSyncExclusions bounds how many entries of one source spec may set
 // `exclude`. Each one is an additional p4 subprocess inside the task's own
 // prepare phase and an additional operator-facing log line, on the same
@@ -549,6 +589,9 @@ func validateSourceSpec(s *SourceSpec) error {
 	}
 	if len(s.Sync) == 0 {
 		return errors.New("source.sync must have at least one sync entry")
+	}
+	if len(s.Sync) > maxSyncEntries {
+		return fmt.Errorf("at most %d sync entries are allowed, got %d", maxSyncEntries, len(s.Sync))
 	}
 	excluded := 0
 	for i, e := range s.Sync {
