@@ -151,11 +151,8 @@ func TestValidateJobSpec_Source_Perforce(t *testing.T) {
 		{"seventeen exclusions", func(s *JobSpec) {
 			s.Tasks[0].Source.Sync = manySyncExclusions(17)
 		}, "at most 16 excluded sync paths are allowed, got 17"},
-		// The other source count bound, through the SAME type aliases: this
-		// package declares SourceSpec and SyncEntry as aliases of the jobspec
-		// types and ValidateJobSpec takes a value rather than a pointer, and
-		// these rows prove the rule survives that surface at both sides of the
-		// boundary.
+		// The other source count bound, reached through ValidateJobSpec's value
+		// parameter rather than jobspec.Validate's pointer.
 		{"five hundred and thirteen sync entries", func(s *JobSpec) {
 			s.Tasks[0].Source.Sync = manySyncIncludes(513)
 		}, "at most 512 sync entries are allowed, got 513"},

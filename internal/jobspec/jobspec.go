@@ -303,42 +303,18 @@ const maxCommandsPerJob = 25000
 // wanting more is better served by naming a parent path. 512 is several times
 // that outer edge.
 //
-// IT IS THE OTHER END OF AN EXISTING RANGE. validateSourceSpec already refuses
-// an empty sync list, and this is that sentence's upper end.
+// IT COUNTS ENTRIES, NOT #head ENTRIES. The costs it bounds are driven by the
+// entry count, not by any rev; TestValidate_TheSyncEntryCountCountsEveryEntry
+// pins that axis.
 //
-// IT STILL BINDS, ON BOTH AXES. maxBodyBytes (1 MiB, internal/api/server.go)
-// caps how many entries one request can carry, and it sits far above this
-// bound. The cheapest entry the decoder accepts is 25 bytes and 41938 of them
-// fit one body, so on the ENTRY COUNT this cap is roughly an 82x reduction. The
-// cheapest entry that also costs a p4 round trip is 28 bytes and 37445 fit, so
-// on the ROUND TRIPS it is roughly 73x. THE TWO MUST NOT BE COLLAPSED: they are
-// different entry shapes bounding different costs, and the cheaper one pins its
-// revision rather than spelling #head.
-//
-// EVERY COST IT BOUNDS IS DRIVEN BY THE ENTRY COUNT, NOT BY ANY rev: one
-// ResolveHead round trip per #head entry inside the task's own prepare phase,
-// repeated on every attempt; one argv element per include on the single p4 sync;
-// the second factor of the O(exclusions x len(Sync)) coverage and swallow loops
-// below, which perforce.preemptSpecs walks again; and one BaselineHash per
-// prepare and one per candidate worker scored by scheduler.selectWorker. A bound
-// on the #head subset would leave all but the first of those open.
-//
-// IT DOES NOT BOUND ARGV BYTES. Path length is bounded by maxBodyBytes alone, so
-// 512 long client paths is still a large command line and platform command-line
-// limits are real. That is a pre-existing hazard this narrows and does not close.
-//
-// CHECKED BEFORE THE PER-ENTRY LOOP, so an over-count spec is refused without
-// paying three prefix checks, a control-byte scan and up to four regexp matches
-// per entry, and without the quadratic below. That places it above the
-// excluded-count check, which needs the count that loop produces; a spec over
-// both bounds therefore reports the entry count, which is the number knowable
-// without work and the more actionable of the two.
-//
-// DO NOT RAISE THIS WITHOUT A REFUSED REAL SUBMISSION. "The number looks small"
-// is not the reason. And 512 is deliberately not 500: maxCommandsPerTask above
-// is the other concentration control on this quantity, the two are independent -
-// one counts commands the agent executes, the other counts p4 round trips before
-// any command runs - and a cap spelled identically would read as derived from it.
+// IT DOES NOT BOUND ARGV BYTES, AND IT DOES NOT NARROW THEM EITHER. SyncStream
+// passes one argv element per include to a single exec, and path length is bounded
+// by maxBodyBytes alone - before this bound one entry carrying a megabyte-long path
+// was legal, and after it 512 long paths still are. A 512-entry list of ordinary
+// depot paths already exceeds the tightest documented platform command-line limit,
+// so this cap sits ABOVE that ceiling and must not be read as protecting the sync
+// invocation. The exec fails rather than truncating, and it fails only after the
+// per-entry ResolveHead loop has already run.
 //
 // DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
 // Validate running on STORED scheduled_jobs.job_spec rows, and it applies
@@ -354,9 +330,9 @@ const maxSyncEntries = 512
 // named heavy subtrees; 16 is several times that.
 //
 // IT ALSO BOUNDS A QUADRATIC. The coverage and swallow rules in
-// validateSourceSpec compare every exclusion against every include, and the
-// include side is bounded only by maxBodyBytes. The count is therefore checked
-// BEFORE that loop runs, so an over-count spec is refused after one linear pass.
+// validateSourceSpec compare every exclusion against every include. The count is
+// therefore checked BEFORE that loop runs, so an over-count spec is refused
+// after one linear pass.
 //
 // DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
 // Validate running on STORED scheduled_jobs.job_spec rows, and it applies

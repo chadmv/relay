@@ -135,6 +135,36 @@ func TestValidate_TheSyncEntryCountIsCheckedBeforeEveryPerEntryRule(t *testing.T
 	})
 }
 
+// TestValidate_TheSyncEntryCountIsCheckedForEveryTask pins that the bound runs
+// against each task's own source rather than one representative task.
+//
+// The over-count source is the SECOND task and the first is legal, so a loop
+// that validates only spec.Tasks[0] returns nil here while every other case in
+// this file stays green - every other Source-bearing fixture in the tree is
+// single-task. The expected message names t2, so the same case also pins that
+// the wrapper interpolates the task the refusal came from.
+func TestValidate_TheSyncEntryCountIsCheckedForEveryTask(t *testing.T) {
+	sourceTask := func(name string, n int) TaskSpec {
+		return TaskSpec{
+			Name:    name,
+			Command: []string{"true"},
+			Source: &SourceSpec{
+				Type:   "perforce",
+				Stream: syncStream,
+				Sync:   syncIncludes(n),
+			},
+		}
+	}
+	spec := &JobSpec{
+		Name:  "sync-bounds",
+		Tasks: []TaskSpec{sourceTask("t1", 1), sourceTask("t2", 513)},
+	}
+	require.EqualError(t, Validate(spec),
+		"task t2: at most 512 sync entries are allowed, got 513",
+		"the bound is per source spec, so a job whose first task is legal must still be "+
+			"refused on the task that is not, and named by it")
+}
+
 // TestValidate_TheSyncEntryCountCountsEveryEntry pins the AXIS: the bound counts
 // entries, not includes and not #head entries. Both cases below are legal on
 // every other rule, so an implementation that counts the wrong subset accepts
