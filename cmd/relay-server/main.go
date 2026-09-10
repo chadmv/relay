@@ -396,12 +396,23 @@ func main() {
 	// be correct, so the purely diagnostic pass does not delay it.
 	//
 	// A FAILURE HERE MUST NOT STOP THE BOOT. Per-row record failures are logged
-	// inside and the sweep continues; a page query's error and a mid-sweep
-	// cancellation are returned and logged here as a warning, and the server
-	// carries on. Turning a schedule problem into a server that will not start
-	// would be worse than the invisibility this closes.
-	if err := schedrunner.ValidateStoredSpecsOnStartup(ctx, q); err != nil {
-		log.Printf("warn: schedrunner startup validation: %v", err)
+	// inside and the sweep continues; a page query's error, a shutdown and the
+	// pass's own expired budget are returned, and startupValidationLines gives
+	// each of the three its own shape - only one of them is a warning. The server
+	// carries on in every case. Turning a schedule problem into a server that will
+	// not start would be worse than the invisibility this closes.
+	startupValidationDeadline, startupValidationWarning := parseStartupValidationDeadline(
+		"RELAY_STARTUP_VALIDATION_DEADLINE", os.Getenv("RELAY_STARTUP_VALIDATION_DEADLINE"))
+	if startupValidationWarning != "" {
+		log.Printf("WARNING: %s", startupValidationWarning)
+	}
+	log.Print(startupValidationDeadlineLine(startupValidationDeadline))
+
+	startupValidationStart := time.Now()
+	sweep, sweepErr := schedrunner.ValidateStoredSpecsOnStartup(ctx, q, startupValidationDeadline)
+	for _, line := range startupValidationLines(sweep, sweepErr, startupValidationDeadline,
+		time.Since(startupValidationStart)) {
+		log.Print(line)
 	}
 	go schedrunner.NewRunner(pool, q).Run(ctx)
 

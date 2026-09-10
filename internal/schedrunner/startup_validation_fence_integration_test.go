@@ -127,7 +127,10 @@ func TestValidateStoredSpecsOnStartup_DoesNotStampAStaleFailureOverAConcurrentRe
 	require.NoError(t, repair.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID))
 
 	done := make(chan error, 1)
-	go func() { done <- schedrunner.ValidateStoredSpecsOnStartup(ctx, h.q) }()
+	go func() {
+		_, sweepErr := schedrunner.ValidateStoredSpecsOnStartup(ctx, h.q, 60*time.Second)
+		done <- sweepErr
+	}()
 
 	waitForBlockedScheduledJobsUpdate(t, h.pool, holderPID, 30*time.Second)
 
@@ -191,7 +194,8 @@ func TestValidateStoredSpecsOnStartup_ReRecordingAnIdenticalMessageIsANoOp(t *te
 
 	var firstBoot bytes.Buffer
 	restore := captureLog(t, &firstBoot)
-	require.NoError(t, schedrunner.ValidateStoredSpecsOnStartup(ctx, h.q))
+	_, err = schedrunner.ValidateStoredSpecsOnStartup(ctx, h.q, 60*time.Second)
+	require.NoError(t, err)
 	restore()
 
 	recorded, err := h.q.GetScheduledJob(ctx, broken.ID)
@@ -211,7 +215,8 @@ func TestValidateStoredSpecsOnStartup_ReRecordingAnIdenticalMessageIsANoOp(t *te
 
 	var secondBoot bytes.Buffer
 	restore = captureLog(t, &secondBoot)
-	require.NoError(t, schedrunner.ValidateStoredSpecsOnStartup(ctx, h.q))
+	_, err = schedrunner.ValidateStoredSpecsOnStartup(ctx, h.q, 60*time.Second)
+	require.NoError(t, err)
 	restore()
 
 	after, err := h.q.GetScheduledJob(ctx, broken.ID)

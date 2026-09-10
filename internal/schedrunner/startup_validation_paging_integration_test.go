@@ -176,7 +176,8 @@ func TestValidateStoredSpecsOnStartup_ReadsInPagesOfOneHundred(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	require.NoError(t, schedrunner.ValidateStoredSpecsOnStartup(ctx, q))
+	res, err := schedrunner.ValidateStoredSpecsOnStartup(ctx, q, 60*time.Second)
+	require.NoError(t, err)
 
 	require.Equal(t, 3, tr.selectCount(),
 		"250 enabled rows at 100 per page is three reads: 100, 100, then a short 50. "+
@@ -185,6 +186,12 @@ func TestValidateStoredSpecsOnStartup_ReadsInPagesOfOneHundred(t *testing.T) {
 	require.Equal(t, 250, countRecordedFailures(t, h),
 		"THE POSITIVE ASSERTION. Without it a sweep that dropped the final page, or stopped "+
 			"after one page, would still satisfy a statement count alone")
+
+	require.Equal(t, 250, res.Checked,
+		"THE EXACT SIBLING AT THE FULL-COUNT END. A range assertion elsewhere is only bracketed if "+
+			"one test pins Checked against a known complete pass")
+	require.False(t, res.Truncated,
+		"a pass that fits inside its budget must not hedge: a caveat on every boot is one nobody reads")
 }
 
 // TestValidateStoredSpecsOnStartup_ACancelledSweepReturnsInsteadOfLoggingEveryRow
@@ -223,7 +230,7 @@ func TestValidateStoredSpecsOnStartup_ACancelledSweepReturnsInsteadOfLoggingEver
 	})
 	q := store.New(tracedPool(t, h, tr))
 
-	err := schedrunner.ValidateStoredSpecsOnStartup(ctx, q)
+	_, err := schedrunner.ValidateStoredSpecsOnStartup(ctx, q, 60*time.Second)
 
 	require.ErrorIs(t, err, context.Canceled,
 		"a cancelled sweep must return the cause once, not swallow it")
@@ -275,7 +282,8 @@ func TestSweepPageReadMatcherExcludesTheReconcilePageRead(t *testing.T) {
 	defer cancel()
 
 	require.NoError(t, schedrunner.ReconcileOnStartup(ctx, q))
-	require.NoError(t, schedrunner.ValidateStoredSpecsOnStartup(ctx, q))
+	_, err := schedrunner.ValidateStoredSpecsOnStartup(ctx, q, 60*time.Second)
+	require.NoError(t, err)
 
 	require.Equal(t, 1, tr.selectCount(),
 		"the sweep issued one page read. 2 means isSweepPageRead also counted the reconcile's, "+

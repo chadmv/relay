@@ -3,8 +3,10 @@ package schedrunner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"time"
 
 	"relay/internal/jobspec"
 	"relay/internal/store"
@@ -30,6 +32,23 @@ import (
 // the code lacks about how many rows to hold at once; if the ceiling moves it
 // should move for everyone, in a commit that says why.
 const sweepPageSize = 100
+
+// SweepResult is what one ValidateStoredSpecsOnStartup pass observed.
+//
+// THE THREE FIELDS TRAVEL TOGETHER ON PURPOSE. A caller that wanted to print
+// Checked without the caveat would have to actively ignore an adjacent field of
+// the same struct, which is stronger than a boolean the call site reconstructs.
+type SweepResult struct {
+	// Checked is how many enabled rows this pass validated.
+	Checked int
+	// Invalid is how many of those no longer validate. It counts VERDICTS, not
+	// writes: a verdict whose UPDATE was refused by the content fence, or
+	// errored, or was already recorded, is counted here and produced no log line.
+	Invalid int
+	// Truncated means the budget ran out. When it is true, Checked and Invalid are
+	// FLOORS over an enabled set whose size this pass never learned.
+	Truncated bool
+}
 
 // ValidateStoredSpecsOnStartup re-validates every ENABLED schedule's stored spec
 // once at boot and records a failure for each one that no longer passes. Call
@@ -76,37 +95,71 @@ const sweepPageSize = 100
 //
 // A PER-ROW FAILURE MUST NOT STOP THE SERVER BOOTING, and it cannot. A per-row
 // record failure is logged and the sweep continues, so one bad row costs one log
-// line rather than the remaining schedules. Two things ARE returned: a page
-// query's error, and the cancellation the row loop checks for. The caller in
-// cmd/relay-server logs either as a warning. Converting an
+// line rather than the remaining schedules. THREE things ARE returned: a page
+// query's error, a parent cancellation, and this pass's own expired budget. The
+// caller distinguishes them - only one of the three is a warning. Converting an
 // operator-visible schedule problem into a server that will not start would be
 // strictly worse than the invisibility this sweep exists to fix.
 //
-// THAT IS NARROWER THAN "THIS SWEEP CANNOT STOP THE BOOT", and the gap is in
-// FRONT of the loop rather than inside it. The read is paged, so peak memory and
-// per-statement work are bounded by sweepPageSize. THE SWEEP'S TOTAL WALL CLOCK
-// IS STILL PROPORTIONAL TO THE NUMBER OF ENABLED SCHEDULES, and nothing here
-// bounds that number: paging converted an unbounded allocation into an unbounded
-// duration. The caller runs this before srv.ListenAndServe(), so a large enough
-// scheduled_jobs table still delays the boot, and the HTTP API an operator would
-// use to delete the offending rows is exactly what never comes up. Growing that
-// table is an ordinary authenticated user's privilege, bounded per owner (NOT
-// per fleet) by RELAY_MAX_SCHEDULES_PER_OWNER: M accounts hold M x that number,
-// and how many accounts exist is a separate question with a separate control.
+// THE PASS IS BOUNDED AT budget PLUS ONE ROW'S WORK, and stating it as exactly
+// budget would be the overclaim. The ctx.Err() check is at the top of the ROW
+// loop, so the last row admitted before the deadline still runs its full
+// jobspec.Validate - up to maxCommandsPerJob commands - and its
+// RecordScheduledJobFailure round trip past it. THAT RESIDUAL IS A PER-ROW
+// CONSTANT: it does not grow with the number of stored schedules, which is the
+// property a bound on this pass has to deliver. Peak memory stays one page.
+//
+// WHAT THE BOUND COSTS INSTEAD IS COVERAGE, and the quantity that drives it is
+// the enabled schedule count, which an ordinary authenticated user grows -
+// bounded per owner, NOT per fleet, by RELAY_MAX_SCHEDULES_PER_OWNER, over an
+// owner population that is itself unbounded under RELAY_ALLOW_SELF_REGISTER.
 // THAT CAP BOUNDS THE STARTING WORK SET AND NOT THE PASS, because every page is
 // a fresh snapshot: a row inserted mid-sweep joins the work set whenever its
-// gen_random_uuid() id sorts above the cursor, so an owner sitting at the cap
-// can delete and re-POST to keep feeding one. The pass still converges, since
-// the unswept fraction of the key space only shrinks, so that residual is
-// duration amplification rather than non-termination - and
-// bounding the duration itself wants a deadline on this sweep:
-// docs/backlog/feature-2026-09-04-wall-clock-deadline-on-the-boot-sweep.md.
+// gen_random_uuid() id sorts above the cursor. So the remedy for a truncated
+// pass is to tighten that quantity first; raising the budget widens a boot delay
+// the same population can drive.
+//
+// TRUNCATION PRODUCES FALSE NEGATIVES AND NEVER FALSE POSITIVES. This pass only
+// ever ADDS records - see RecordScheduledJobFailure's own header for why it has
+// no clearing sibling - so a last_error that is SET is exactly as trustworthy
+// after a truncated pass as after a complete one. Only the ABSENCE of one loses
+// its meaning: it means "nothing was recorded", which after a truncated pass
+// does not mean "this spec validates".
+//
+// A ZERO OR NEGATIVE BUDGET IS AN EXPIRED DEADLINE, NOT AN ABSENT ONE.
+// context.WithTimeout gives that with no special case: the pass checks nothing
+// and reports Truncated with Checked 0, loudly. DO NOT ADD A "budget <= 0 means
+// unbounded" BRANCH. It would restore an unbounded boot from a zero value, the
+// same failure shape as an epoch-fenced query called with a zero-value epoch.
+// TestValidateStoredSpecsOnStartup_AnExpiredBudgetChecksNothingRatherThanRunningUnbounded
+// is what goes red.
+//
+// Truncated IS DERIVED FROM THIS FUNCTION'S OWN CHILD CONTEXT, never from the
+// returned error, and it is set at EVERY non-nil return including the first page
+// query's. A parent cancellation and this budget's deadline both stop the pass
+// and only the context tells them apart, so "Truncated: err != nil" would make a
+// mid-boot shutdown advertise a deadline that did not fire and prescribe a knob
+// that is not the problem.
+// TestValidateStoredSpecsOnStartup_AShutdownIsNotATruncation kills that.
+//
+// THE BUDGET IS A PARAMETER AND THE TIMEOUT IS BUILT HERE rather than by the
+// caller, because every other statement in the caller's boot region takes a ctx
+// meant to live for the whole process; a bounded one in that scope is a variable
+// that looks exactly like ctx and kills whichever long-lived consumer receives
+// it. It is env-configurable where sweepPageSize above refuses to be, and the
+// two answers differ for a reason rather than by inconsistency: the right budget
+// depends on the operator's fleet, database and startup probe, while no operator
+// has information the code lacks about how many rows to hold at once.
 //
 // Cost: for N enabled schedules that do not change during the pass,
 // floor(N/sweepPageSize)+1 SELECTs and one UPDATE per BROKEN row, with peak
 // resident rows of one page rather than N.
-func ValidateStoredSpecsOnStartup(ctx context.Context, q *store.Queries) error {
+func ValidateStoredSpecsOnStartup(ctx context.Context, q *store.Queries, budget time.Duration) (SweepResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
 	var (
+		res       SweepResult
 		cursor    pgtype.UUID
 		cursorSet bool
 	)
@@ -117,7 +170,8 @@ func ValidateStoredSpecsOnStartup(ctx context.Context, q *store.Queries) error {
 			PageLimit: sweepPageSize,
 		})
 		if err != nil {
-			return err
+			res.Truncated = errors.Is(ctx.Err(), context.DeadlineExceeded)
+			return res, err
 		}
 		for _, row := range rows {
 			// A CANCELLED SWEEP RETURNS RATHER THAN RUNNING ON. Every remaining
@@ -129,13 +183,20 @@ func ValidateStoredSpecsOnStartup(ctx context.Context, q *store.Queries) error {
 			// sweepPageSize lines. RETURN rather than break, so the caller names
 			// the cause once instead of reporting a clean pass.
 			if err := ctx.Err(); err != nil {
-				return err
+				res.Truncated = errors.Is(ctx.Err(), context.DeadlineExceeded)
+				return res, err
 			}
+			res.Checked++
 
 			text, ok := recordableFailure(validateStoredRow(row))
 			if !ok {
 				continue
 			}
+			// COUNTED AT THE VERDICT, not at the write. The UPDATE below returns 0
+			// for two ordinary reasons, so a count of writes would read as "how
+			// many schedules are broken" and be wrong for every schedule that was
+			// already broken yesterday.
+			res.Invalid++
 			// THE THREE COLUMNS PASSED BACK ARE THE FENCE, and they are exactly the
 			// three validateStoredRow read. The write lands only if the row is still
 			// the generation this verdict is about; see RecordScheduledJobFailure's
@@ -175,7 +236,7 @@ func ValidateStoredSpecsOnStartup(ctx context.Context, q *store.Queries) error {
 		cursor = rows[len(rows)-1].ID
 		cursorSet = true
 	}
-	return nil
+	return res, nil
 }
 
 // validateStoredRow returns a permanent() error if the row's stored data cannot

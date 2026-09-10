@@ -279,7 +279,10 @@ func (r *Runner) advanceNextRun(ctx context.Context, q *store.Queries, row store
 // PEAK MEMORY IS ONE PAGE OF FOUR NARROW COLUMNS. THE DURATION IS BOUNDED BY
 // NOTHING - one round trip per page plus one UPDATE per overdue row, all of it
 // ahead of srv.ListenAndServe(). Paging bounds the allocation and not the
-// duration, the same trade ValidateStoredSpecsOnStartup makes.
+// duration. Bounding THIS pass is a different decision with a user-facing cost,
+// not a second application of the sweep's: a truncated reconcile leaves rows
+// overdue, and the ticker then fires each of them ONCE, which is exactly the
+// catch-up README promises never happens.
 //
 // A PER-ROW FAILURE MUST NOT STOP THE BOOT. A cron that no longer parses is
 // logged and skipped WITHOUT advancing next_run_at, so the row stays overdue and

@@ -91,7 +91,8 @@ func TestValidateStoredSpecsOnStartup(t *testing.T) {
 		planted, fine.ID)
 	require.NoError(t, err)
 
-	require.NoError(t, schedrunner.ValidateStoredSpecsOnStartup(ctx, h.q))
+	_, err = schedrunner.ValidateStoredSpecsOnStartup(ctx, h.q, 60*time.Second)
+	require.NoError(t, err)
 
 	brokenRow, err := h.q.GetScheduledJob(ctx, broken.ID)
 	require.NoError(t, err)
