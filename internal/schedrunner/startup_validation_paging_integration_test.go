@@ -107,7 +107,7 @@ func tracedPool(t *testing.T, h *runnerHarness, tr pgx.QueryTracer) *pgxpool.Poo
 // validates, in ONE statement.
 //
 // next_run_at is far in the future for the reason TestValidateStoredSpecsOnStartup
-// gives: neither ListEligibleScheduledJobs nor ListOverdueScheduledJobsForCatchup
+// gives: neither ListEligibleScheduledJobs nor ListOverdueScheduledJobsForCatchupPage
 // can reach these rows, so a pass is attributable to the sweep.
 func seedBrokenSchedules(t *testing.T, h *runnerHarness, owner pgtype.UUID, n int) {
 	t.Helper()

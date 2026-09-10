@@ -27,7 +27,7 @@ import (
 //
 // FOUR PROPERTIES, and the last two are the ones an implementation gets wrong:
 //   - a broken enabled schedule that is NOT overdue is recorded. This is the
-//     whole point: ListEligibleScheduledJobs and ListOverdueScheduledJobsForCatchup
+//     whole point: ListEligibleScheduledJobs and ListOverdueScheduledJobsForCatchupPage
 //     both require next_run_at to have passed, so neither loop sees this row.
 //   - a healthy schedule is left alone.
 //   - next_run_at DOES NOT MOVE. ReconcileOnStartup owns never-catch-up; a
