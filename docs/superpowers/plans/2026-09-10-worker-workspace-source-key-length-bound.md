@@ -1890,12 +1890,53 @@ None are filed by the spec and none are filed by this plan. Four are proposed:
 
 ## Task 0 results
 
-<!-- Filled in by Task 0 step 5. Every "512" in this plan is subject to this block. -->
-
 ```
-M1 btree index entry limit: <MMMM> bytes, on <version() string>.
-M2 longest real stream: <N> bytes. Input: <string, clipped>. Source: <where>.
-   Escalation (>300 bytes): <did not fire | FIRED>
-M3 green baseline: default <...>; integration <...>.
-Number in force: source_key <...> bytes.
+M1 btree index entry limit: 2704 bytes, on
+    "PostgreSQL 16.13 (Debian 16.13-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by
+     gcc (Debian 14.2.0-19) 14.2.0, 64-bit" - a throwaway postgres:16 container, the
+     same image internal/testsupport/pgdsn runs.
+    Error, verbatim: index row size 3024 exceeds btree version 4 maximum 2704 for
+    index "t2_k_idx"
+    704-byte lookup-index payload against it is a headroom factor of 3.84.
+
+    THE PLAN'S PRESCRIBED INSTRUMENT DOES NOT PRODUCE THIS MEASUREMENT. A
+    12800-byte high-entropy value (400 md5 hexes) does fail, but with "index row
+    requires 12816 bytes, maximum size is 8191" - the INDEX_SIZE_MASK ceiling on
+    index-tuple formation, which fires before the btree page check and states a
+    different, larger number. Reading 8191 off that error and treating it as the
+    btree limit would have been a 3x overstatement of the headroom. The value that
+    reaches the btree message is 3008 bytes (94 md5 hexes): over 2704, under 8191.
+
+    Measured directly as well, which is stronger than the arithmetic: a row of
+    64/512/128/128 high-entropy bytes INSERTs through a temp table carrying
+    worker_workspaces' real PRIMARY KEY (worker_id, source_type, source_key) and its
+    real worker_workspaces_lookup_idx (source_type, source_key, baseline_hash).
+
+M2 longest real stream: 20 bytes.
+    Input: "//streams/GameX/main"
+    Source: docs/superpowers/specs/2026-04-24-perforce-workspace-management-design.md,
+    which is a design document, not production data.
+    NO P4 ENVIRONMENT AND NO POPULATED DATABASE WAS REACHABLE IN THIS SESSION. There
+    is no dev Postgres running, so worker_workspaces and tasks.source could not be
+    queried; examples/*.json carry no source.stream field at all. What was reachable:
+    the p4d integration containers' own streams, "//test/main" and "//test/virt", 11
+    bytes each (internal/agent/source/perforce/perforce_integration_test.go); README's
+    example stream "//depot/film-x/main", 19 bytes. The longest depot path of any kind
+    in README is "//depot/film-x/main/Content/Movies/...", 38 bytes, and that is a
+    sync path rather than a stream.
+    Escalation (>300 bytes): did not fire, by a factor of 15 against the largest
+    figure available - but the corpus is test and documentation values, so 512 is
+    recorded as ANCHORED TOP-DOWN ONLY, on M1. The bottom-up direction is a sanity
+    check here and not a derivation.
+
+M3 green baseline, on a clean tree, before any change:
+    go test ./internal/worker/... -count=1
+      -> ok  relay/internal/worker  3.814s   (124 top-level tests)
+    RELAY_TEST_DATABASE_URL=... go test -tags integration -p 1 ./internal/worker/...
+      -> ok  relay/internal/worker  90.569s  (213 top-level tests)
+    No package reported anything but ok in either lane.
+
+Number in force for this slice: source_key 512 bytes. Unmoved by Task 0.
+Unchanged by Task 0 regardless of result: the constructor as enforcement point,
+drop-the-row, no env knob, NOT VALID.
 ```
