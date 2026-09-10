@@ -4,8 +4,21 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"sort"
+	"strings"
 
 	relayv1 "relay/internal/proto/relayv1"
+)
+
+// The two fixed parts of the exclusion-derived key encoding, shared by SourceKey
+// below and isExclusionKeyForStream beneath it.
+//
+// THEY ARE SHARED SO A VERSION MOVE CANNOT DESYNCHRONISE THE PAIR. A predicate
+// that no longer matches the builder returns false for every composite key, so
+// anything counting through it counts zero and fails OPEN - the dangerous
+// direction for a ceiling.
+const (
+	sourceKeyVersionTag = "x1|"
+	sourceKeyDigestHex  = 16
 )
 
 // SourceKey returns the workspace identity for a Perforce source spec: the
@@ -67,5 +80,27 @@ func SourceKey(p *relayv1.PerforceSource) string {
 		// TestSourceKey_ASetBoundaryIsPartOfTheEncoding is the discriminator.
 		h.Write([]byte{0})
 	}
-	return "x1|" + hex.EncodeToString(h.Sum(nil))[:16] + "|" + p.GetStream()
+	return sourceKeyVersionTag + hex.EncodeToString(h.Sum(nil))[:sourceKeyDigestHex] + "|" + p.GetStream()
+}
+
+// isExclusionKeyForStream reports whether key is an exclusion-derived workspace
+// key for exactly this stream. It is the inverse of SourceKey's encoding above
+// and lives beside it so the two move together.
+//
+// THE LENGTH EQUALITY IS WHAT MAKES IT EXACT RATHER THAN A HEURISTIC. A stream
+// may contain "|", so a suffix test alone matches whenever a longer stream's
+// encoding ends with "|" followed by this shorter stream. With the length
+// pinned, key's trailing len(stream) bytes can only be this stream's.
+// TestIsExclusionKeyForStream_IsExactAgainstAStreamContainingAPipe carries the
+// input.
+//
+// A bare stream key cannot reach the true branch: no legal stream starts with
+// the version tag. That is what keeps the stream's shared base workspace outside
+// every population computed through this function.
+func isExclusionKeyForStream(key, stream string) bool {
+	if len(key) != len(sourceKeyVersionTag)+sourceKeyDigestHex+1+len(stream) {
+		return false
+	}
+	return strings.HasPrefix(key, sourceKeyVersionTag) &&
+		strings.HasSuffix(key, "|"+stream)
 }
