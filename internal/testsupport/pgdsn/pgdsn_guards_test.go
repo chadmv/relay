@@ -289,7 +289,7 @@ func TestAssertDSNTargetsDatabase_UserArmCatchesQueryOverrideOnNoUserinfoDSN(t *
 	// is /etc/passwd's field separator - nor in a Windows one, so the only way
 	// wantUser can equal this is by adopting the query.
 	const injectedUser = "pgdsn-guard:injected-user"
-	dsn := "postgres://example.invalid:5432/wanted?user=" + url.QueryEscape(injectedUser)
+	const dsn = "postgres://example.invalid:5432/wanted?user=" + injectedUser
 	u, err := url.Parse(dsn)
 	require.NoError(t, err)
 
