@@ -154,3 +154,119 @@ func TestProvider_AtTheCeilingAColdExclusionPrepareEvictsAndIsAdmitted(t *testin
 				"own log, never to the task log")
 	}
 }
+
+// holdAll makes every seeded workspace un-evictable by giving it a live holder,
+// the seam TestEvictWorkspace_RefusesHeldWorkspace uses. EvictWorkspace's holder
+// check reads p.workspaces, so a registry row with no in-memory Workspace has no
+// holder and is always evictable - which is why this is needed.
+func holdAll(t *testing.T, p *Provider, entries []WorkspaceEntry) {
+	t.Helper()
+	for _, e := range entries {
+		p.mu.Lock()
+		w := NewWorkspace(e.ShortID)
+		p.workspaces[e.ShortID] = w
+		p.mu.Unlock()
+		h, err := w.Acquire(context.Background(), Request{SyncPaths: []string{"//s/x/..."}})
+		require.NoError(t, err)
+		t.Cleanup(h.Release)
+	}
+}
+
+// THE REFUSAL IS THE ASSERTION, AND THE ABSENCE OF THE MINT IS THE
+// DISCRIMINATOR. A prepare that errored after creating the client spec has
+// already produced the artifact this ceiling exists to bound, and "returned an
+// error" is also what a dozen unrelated downstream failures produce.
+//
+// BOTH absences are asserted. The client name travels in `client -o -S <stream>
+// <name>`'s argv; `client -i` carries the spec on STDIN, so its argv is two
+// elements in every mint and cannot distinguish one from another. And
+// os.MkdirAll on the workspace root runs before either, so the directory is the
+// earliest artifact of all.
+//
+// Every slot is held by a running task, which is the only state in which this
+// control refuses at all. The client -d fixtures are registered so a mutant that
+// deletes a held workspace anyway is caught by the count, not by a fixture miss.
+func TestProvider_TheCeilingRefusesWhenEverySlotIsHeld(t *testing.T) {
+	t.Setenv(maxExclusionSetsEnv, "4")
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	reg, err := p.Registry()
+	require.NoError(t, err)
+
+	seeded := seedExclusionWorkspaces(t, reg, root, "h", "//s/x", 4, "bh-warm")
+	for _, e := range seeded {
+		fr.set("client -d "+e.ClientName, "Client deleted.\n")
+	}
+	holdAll(t, p, seeded)
+
+	pf := seedSpec("//s/x", "fresh")
+	client := setColdPrepareFixtures(fr, "h", "fresh", pf)
+	newShortID := allocateShortID(SourceKey(pf), reg)
+
+	_, err = p.Prepare(context.Background(), "task-1",
+		&relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{Perforce: pf}}, func(string) {})
+
+	require.Error(t, err, "with every slot held there is nothing to evict, so the prepare is refused")
+	require.Contains(t, err.Error(), "ceiling")
+	require.Contains(t, err.Error(), maxExclusionSetsEnv,
+		"the refusal names the knob so the remedy is reachable from the task log")
+
+	require.False(t, argvNames(fr, client),
+		"NOTHING WAS MINTED. The client spec persists on the shared Perforce server, so a "+
+			"refusal that still ran `client -o -S` has already produced the artifact the ceiling bounds.")
+	_, statErr := os.Stat(filepath.Join(root, newShortID))
+	require.True(t, os.IsNotExist(statErr), "and no workspace directory was created either")
+	require.Empty(t, clientDeletes(fr), "a held slot is never deleted")
+	require.Equal(t, 4, countExclusionEntries(reg, "//s/x"), "and the population is unchanged")
+}
+
+// THE REFUSAL MUST NOT NAME AN OCCUPANT. It reaches the task log on the stderr
+// stream prefixed "[failed] ", and GET /v1/tasks/{id}/logs is authenticated but
+// not admin-only and carries no per-owner gate - so an occupant's identifiers
+// would make this control a disclosure oracle for another tenant's workspaces.
+//
+// The injected marker appears in no part of the expected message and is not a
+// string this environment can produce on its own, so the assertion cannot go red
+// or green for an unrelated reason.
+func TestProvider_TheCeilingRefusalNamesNoOccupant(t *testing.T) {
+	const marker = "qqzzoccupantqqzz"
+	t.Setenv(maxExclusionSetsEnv, "2")
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	reg, err := p.Registry()
+	require.NoError(t, err)
+
+	var occupants []WorkspaceEntry
+	for i := 0; i < 2; i++ {
+		id := fmt.Sprintf("%s%d", marker, i)
+		e := WorkspaceEntry{
+			ShortID:      id,
+			SourceKey:    SourceKey(seedSpec("//s/x", fmt.Sprintf("occ%d", i))),
+			ClientName:   "relay_h_" + id,
+			BaselineHash: "bh-warm",
+			LastUsedAt:   time.Now().Add(-time.Duration(i+1) * time.Hour),
+		}
+		reg.Upsert(e)
+		require.NoError(t, os.MkdirAll(filepath.Join(root, id), 0o755))
+		fr.set("client -d "+e.ClientName, "Client deleted.\n")
+		occupants = append(occupants, e)
+	}
+	require.NoError(t, reg.Save())
+	holdAll(t, p, occupants)
+
+	pf := seedSpec("//s/x", "fresh")
+	setColdPrepareFixtures(fr, "h", "fresh", pf)
+
+	_, err = p.Prepare(context.Background(), "task-1",
+		&relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{Perforce: pf}}, func(string) {})
+	require.Error(t, err)
+
+	require.NotContains(t, err.Error(), marker,
+		"no occupant identifier may reach a task log any authenticated user can read")
+	require.Contains(t, err.Error(), "2 of at most 2",
+		"the count and the ceiling are what the refusal is allowed to say")
+	require.Contains(t, err.Error(), `"//s/x"`,
+		"the stream is the caller's own, rendered %q and LAST")
+}
