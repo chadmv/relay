@@ -270,3 +270,93 @@ func TestProvider_TheCeilingRefusalNamesNoOccupant(t *testing.T) {
 	require.Contains(t, err.Error(), `"//s/x"`,
 		"the stream is the caller's own, rendered %q and LAST")
 }
+
+// THE BASE WORKSPACE IS NEVER EVICTED BY THE CEILING, and the decoy goes first:
+// the base entry is the OLDEST row and carries a non-empty baseline, so it sorts
+// ahead of every composite under both ordering arms and a pure-LRU candidate
+// list picks it. A client -d fixture is registered for it too, so an
+// implementation that picks it gets as far as the delete and is caught by this
+// test's assertion rather than by a fixture miss.
+//
+// This is the attacker's best outcome: a handful of junk exclusion sets
+// destroying the workspace every non-exclusion task on that stream shares.
+func TestProvider_TheCeilingNeverEvictsTheStreamsBaseWorkspace(t *testing.T) {
+	t.Setenv(maxExclusionSetsEnv, "4")
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	reg, err := p.Registry()
+	require.NoError(t, err)
+
+	baseID := allocateShortID("//s/x", reg)
+	baseClient := "relay_h_" + baseID
+	reg.Upsert(WorkspaceEntry{
+		ShortID:      baseID,
+		SourceKey:    "//s/x",
+		ClientName:   baseClient,
+		BaselineHash: "bh-base",
+		LastUsedAt:   time.Now().Add(-200 * time.Hour),
+	})
+	require.NoError(t, os.MkdirAll(filepath.Join(root, baseID), 0o755))
+	require.NoError(t, reg.Save())
+	fr.set("client -d "+baseClient, "Client deleted.\n")
+
+	seeded := seedExclusionWorkspaces(t, reg, root, "h", "//s/x", 4, "bh-warm")
+	for _, e := range seeded {
+		fr.set("client -d "+e.ClientName, "Client deleted.\n")
+	}
+
+	pf := seedSpec("//s/x", "fresh")
+	setColdPrepareFixtures(fr, "h", "fresh", pf)
+
+	h, err := p.Prepare(context.Background(), "task-1",
+		&relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{Perforce: pf}}, func(string) {})
+	require.NoError(t, err)
+	defer h.Finalize(context.Background())
+
+	_, baseStill := reg.Get(baseID)
+	require.True(t, baseStill,
+		"the base workspace is outside the population and is never an eviction candidate")
+	_, statErr := os.Stat(filepath.Join(root, baseID))
+	require.NoError(t, statErr, "and its directory is untouched")
+
+	require.Equal(t, []string{seeded[0].ClientName}, clientDeletes(fr),
+		"exactly one composite slot was reclaimed, and the base workspace was not it")
+}
+
+// A WARM PREPARE IS NOT GATED. The registry is deliberately OVER the ceiling, so
+// a check hoisted above Prepare's found/not-found branch - or buried inside
+// allocateShortID, where that distinction is invisible - has to evict something,
+// and the candidates include the very workspace this prepare is for.
+//
+// The client -d fixtures are all registered, so the assertion is the COUNT of
+// deletes rather than a fixture miss.
+func TestProvider_AWarmExclusionPrepareAtTheCeilingIsNotGated(t *testing.T) {
+	t.Setenv(maxExclusionSetsEnv, "4")
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	reg, err := p.Registry()
+	require.NoError(t, err)
+
+	seeded := seedExclusionWorkspaces(t, reg, root, "h", "//s/x", 5, "bh-warm")
+	for _, e := range seeded {
+		fr.set("client -d "+e.ClientName, "Client deleted.\n")
+	}
+
+	// The spec for seed2 - an entry that is ALREADY in the registry.
+	pf := seedSpec("//s/x", "seed2")
+	client := setColdPrepareFixtures(fr, "h", "seed2", pf)
+	require.Equal(t, seeded[2].ClientName, client,
+		"the premise: this prepare is warm, so it reuses the seeded short id and client name")
+
+	h, err := p.Prepare(context.Background(), "task-1",
+		&relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{Perforce: pf}}, func(string) {})
+	require.NoError(t, err, "a warm prepare is never gated by the ceiling")
+	defer h.Finalize(context.Background())
+
+	require.Empty(t, clientDeletes(fr),
+		"no eviction: the ceiling is checked only in the not-found arm")
+	require.Equal(t, 5, countExclusionEntries(reg, "//s/x"),
+		"and the over-ceiling population is left exactly as it was found")
+}
