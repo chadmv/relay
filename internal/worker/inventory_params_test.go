@@ -165,3 +165,48 @@ func TestInventoryUpsertParams_EveryAgentSuppliedStringIsBounded(t *testing.T) {
 		})
 	}
 }
+
+// TestInventoryUpsertParams_LastUsedAtMustParseAndBeNonZero closes the other way
+// one bad row rolls back a batch: an unparseable value yields the zero time and
+// binds pgtype.Timestamptz{Valid: false}, i.e. SQL NULL, into a TIMESTAMPTZ NOT
+// NULL column.
+//
+// The zero-time case is NOT a restatement of the unparseable one and is the
+// reachable honest case: an agent whose registry entry has an unset timestamp
+// formats it as the year-one instant, which parses cleanly and is still NULL by
+// the time it is bound. Checking only that the parse succeeded would let it
+// through.
+func TestInventoryUpsertParams_LastUsedAtMustParseAndBeNonZero(t *testing.T) {
+	cases := []struct {
+		name string
+		ts   string
+	}{
+		{"blank", ""},
+		{"not RFC3339", "10 September 2026"},
+		{"parses but is the zero time", "0001-01-01T00:00:00Z"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := legalUpdate()
+			u.LastUsedAt = tc.ts
+			_, err := inventoryUpsertParams(testWorkerID, u)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, errUnstorableInventoryRow))
+			assert.Contains(t, err.Error(), "last_used_at")
+			if tc.ts != "" {
+				assert.NotContains(t, err.Error(), tc.ts,
+					"time.Parse's own message echoes its input, which is agent-supplied. The "+
+						"wrapper must not carry it: handleInventoryUpdate's rule is that no wire "+
+						"value reaches a log line.")
+			}
+		})
+	}
+
+	t.Run("a real timestamp binds as NOT NULL", func(t *testing.T) {
+		p, err := inventoryUpsertParams(testWorkerID, legalUpdate())
+		require.NoError(t, err)
+		require.True(t, p.LastUsedAt.Valid,
+			"Valid false is SQL NULL, which is what the NOT NULL column refuses")
+		assert.Equal(t, 2026, p.LastUsedAt.Time.Year())
+	})
+}

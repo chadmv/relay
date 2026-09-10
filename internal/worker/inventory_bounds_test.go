@@ -118,6 +118,8 @@ func TestApplyInventory_EveryRefusedRowIsDroppedAndTheBatchStillCommits(t *testi
 		{"source_key with a NUL", func(u *relayv1.WorkspaceInventoryUpdate) { u.SourceKey = "//sk" + nul + "bad" }},
 		{"short_id with a NUL", func(u *relayv1.WorkspaceInventoryUpdate) { u.ShortId = "shid" + nul + "bad" }},
 		{"baseline_hash with a NUL", func(u *relayv1.WorkspaceInventoryUpdate) { u.BaselineHash = "bh" + nul + "bad" }},
+		{"last_used_at unparseable", func(u *relayv1.WorkspaceInventoryUpdate) { u.LastUsedAt = "" }},
+		{"last_used_at is the zero time", func(u *relayv1.WorkspaceInventoryUpdate) { u.LastUsedAt = "0001-01-01T00:00:00Z" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

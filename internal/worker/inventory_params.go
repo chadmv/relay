@@ -77,14 +77,30 @@ func inventoryUpsertParams(workerID pgtype.UUID, u *relayv1.WorkspaceInventoryUp
 	if err := checkStorableText("baseline_hash", u.BaselineHash, maxWorkspaceBaselineHashBytes); err != nil {
 		return store.UpsertWorkerWorkspaceParams{}, err
 	}
-	ts, _ := time.Parse(time.RFC3339, u.LastUsedAt)
+	// THE PARSE ALONE IS NOT THE CHECK. An unparseable value yields the zero time,
+	// which binds as SQL NULL against a TIMESTAMPTZ NOT NULL column and fails the
+	// statement - and a zero time.Time formats as the year-one RFC3339 instant,
+	// which parses, so a value that got past the parse can still be NULL by the
+	// time it is bound.
+	//
+	// time.Parse's own error message echoes its input, so it is deliberately not
+	// wrapped: the returned error carries a column name and nothing agent-supplied.
+	ts, err := time.Parse(time.RFC3339, u.LastUsedAt)
+	if err != nil {
+		return store.UpsertWorkerWorkspaceParams{}, fmt.Errorf(
+			"%w: last_used_at is not RFC3339", errUnstorableInventoryRow)
+	}
+	if ts.IsZero() {
+		return store.UpsertWorkerWorkspaceParams{}, fmt.Errorf(
+			"%w: last_used_at is the zero time", errUnstorableInventoryRow)
+	}
 	return store.UpsertWorkerWorkspaceParams{
 		WorkerID:     workerID,
 		SourceType:   u.SourceType,
 		SourceKey:    u.SourceKey,
 		ShortID:      u.ShortId,
 		BaselineHash: u.BaselineHash,
-		LastUsedAt:   pgtype.Timestamptz{Time: ts, Valid: !ts.IsZero()},
+		LastUsedAt:   pgtype.Timestamptz{Time: ts, Valid: true},
 	}, nil
 }
 
