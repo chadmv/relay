@@ -497,7 +497,7 @@ type ListEnabledScheduledJobsPageParams struct {
 //
 // EVERY enabled schedule, not just the overdue ones. The startup sweep's whole
 // point is the schedules NEITHER existing loop sees: ListEligibleScheduledJobs
-// and ListOverdueScheduledJobsForCatchup both require next_run_at to have
+// and ListOverdueScheduledJobsForCatchupPage both require next_run_at to have
 // passed, so a healthy-looking @monthly schedule broken by a retroactive
 // validation change stays invisible for up to a month after the fix deploys.
 //
@@ -583,42 +583,89 @@ func (q *Queries) ListEnabledScheduledJobsPage(ctx context.Context, arg ListEnab
 	return items, nil
 }
 
-const listOverdueScheduledJobsForCatchup = `-- name: ListOverdueScheduledJobsForCatchup :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
+const listOverdueScheduledJobsForCatchupPage = `-- name: ListOverdueScheduledJobsForCatchupPage :many
+SELECT id, name, cron_expr, timezone FROM scheduled_jobs
  WHERE enabled
    AND next_run_at < NOW()
+   AND (NOT $1::bool OR id > $2::uuid)
+ ORDER BY id
+ LIMIT $3::int
 `
 
-// ListOverdueScheduledJobsForCatchup
+type ListOverdueScheduledJobsForCatchupPageParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"page_limit"`
+}
+
+type ListOverdueScheduledJobsForCatchupPageRow struct {
+	ID       pgtype.UUID `json:"id"`
+	Name     string      `json:"name"`
+	CronExpr string      `json:"cron_expr"`
+	Timezone string      `json:"timezone"`
+}
+
+// ONE PAGE of overdue enabled schedules for schedrunner.ReconcileOnStartup,
+// keyset-paged on the primary key exactly as ListEnabledScheduledJobsPage is.
+// That statement's header carries the reasoning for ORDER BY id, for the exact
+// LIMIT with no `+ 1`, and for cursor_set rather than a zero-uuid seed. All of
+// it holds verbatim here and is not repeated; what follows is only what differs.
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
+// THE PREDICATE SELECTS ON A COLUMN THE CALLER WRITES, and the cursor is what
+// makes that safe. Each page is a fresh statement with a fresh NOW(), and the
+// loop advances next_run_at on the rows it reads. A design that re-queried this
+// predicate WITHOUT a cursor, relying on each row's own advance to remove it
+// from the result, re-reads forever every row the loop does not advance: a cron
+// that no longer parses, an UPDATE that failed, or a schedule whose interval is
+// shorter than the pass. `id > cursor_id` excludes every row already read
+// whatever the loop did with it, so each full page permanently retires
+// page_limit ROWS from a finite candidate set and termination does not depend on
+// the loop body succeeding at anything. A row that becomes overdue above the
+// cursor mid-pass joins the work set, since every page is a fresh snapshot;
+// that is duration amplification rather than non-termination, as it is for
+// ListEnabledScheduledJobsPage.
+//
+// FOUR COLUMNS, NOT SELECT *, AND THE LIST IS THE BOUND. ReconcileOnStartup
+// reads id (the advance, and the cursor), name (its two log lines) and
+// cron_expr with timezone (ParseSchedule). It reads job_spec zero times and
+// sends nothing back, and job_spec is bounded only by maxBodyBytes at 1 MiB, so
+// dropping it is a larger lever per row than any page size - which is also why
+// ListEnabledScheduledJobsPage, whose validator reads job_spec and whose fence
+// sends it back, keeps SELECT *.
+// TestOverdueCatchupPageRowCarriesOnlyTheFourColumnsReconcileReads is what goes
+// red if a column comes back.
+//
+// NO FENCE ON THE ADVANCE, unlike RecordScheduledJobFailure beside it, and the
+// difference is what a stale write costs. That one writes a VERDICT about
+// content it read, so a stale write is a false alarm on a repaired schedule.
+// What replaces the fence here is self-healing on the next fire, since fireOne
+// recomputes next_run_at from the row's current cron. A PATCH landing between
+// this read and the advance can still have its freshly computed next_run_at
+// clobbered by one derived from the pre-patch cron; that residual is bounded at
+// one fire, and a fence would be worse - a fenced non-match SKIPS the advance,
+// and a row left overdue produces exactly the one spurious fire the
+// never-catch-up policy forbids.
+//
+//	SELECT id, name, cron_expr, timezone FROM scheduled_jobs
 //	 WHERE enabled
 //	   AND next_run_at < NOW()
-func (q *Queries) ListOverdueScheduledJobsForCatchup(ctx context.Context) ([]ScheduledJob, error) {
-	rows, err := q.db.Query(ctx, listOverdueScheduledJobsForCatchup)
+//	   AND (NOT $1::bool OR id > $2::uuid)
+//	 ORDER BY id
+//	 LIMIT $3::int
+func (q *Queries) ListOverdueScheduledJobsForCatchupPage(ctx context.Context, arg ListOverdueScheduledJobsForCatchupPageParams) ([]ListOverdueScheduledJobsForCatchupPageRow, error) {
+	rows, err := q.db.Query(ctx, listOverdueScheduledJobsForCatchupPage, arg.CursorSet, arg.CursorID, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ScheduledJob
+	var items []ListOverdueScheduledJobsForCatchupPageRow
 	for rows.Next() {
-		var i ScheduledJob
+		var i ListOverdueScheduledJobsForCatchupPageRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Name,
-			&i.OwnerID,
 			&i.CronExpr,
 			&i.Timezone,
-			&i.JobSpec,
-			&i.OverlapPolicy,
-			&i.Enabled,
-			&i.NextRunAt,
-			&i.LastRunAt,
-			&i.LastJobID,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.LastError,
-			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}

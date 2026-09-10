@@ -320,9 +320,9 @@ $env:RELAY_GRPC_ADDR    = ":9090"
 2. Seed grace timers for any agents that had active tasks when the server last stopped (tasks requeue if the agent does not reconnect within `RELAY_WORKER_GRACE_WINDOW`)
 3. Start the gRPC server (agent connections), with one stream per connection, the `RELAY_GRPC_MAX_CONNS` / `RELAY_GRPC_MAX_CONNS_PER_IP` admission caps applied at the listener, and a deadline on the first `RegisterRequest`. All four effective bounds are printed unconditionally at startup.
 4. Start the task dispatch scheduler, the Postgres LISTEN/NOTIFY trigger, and the stale-task watchdog (which ends assignments that blow `RELAY_TASK_WATCHDOG_MARGIN` or `RELAY_TASK_MAX_ASSIGNMENT`)
-5. Start an hourly janitor that purges expired enrollment tokens
-6. Start the HTTP server (CLI / API traffic)
-7. Reconcile scheduled jobs (advance any `next_run_at` that fell in the past while the server was down, then start the scheduler polling loop)
+5. Reconcile scheduled jobs (advance any `next_run_at` that fell in the past while the server was down), then re-validate every enabled schedule's stored spec and record the ones that no longer validate, then start the scheduler polling loop. All three run before the HTTP listener.
+6. Start an hourly janitor that purges expired enrollment tokens
+7. Start the HTTP server (CLI / API traffic)
 
 ### Database schema
 

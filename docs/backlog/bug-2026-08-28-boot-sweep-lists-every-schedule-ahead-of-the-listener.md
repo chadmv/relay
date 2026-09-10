@@ -41,11 +41,6 @@ claims, and the unbounded read in front of the loop is not covered by it. Worth 
 comment even if the paging is not done, since a wrong contract in prose is a defect on this
 project.
 
-Every other read of `job_spec` in the tree is bounded: `handleListScheduledJobs` is paged,
-`ListEligibleScheduledJobs` has `LIMIT $1` at `BatchLimit = 100`, and
-`ListOverdueScheduledJobsForCatchup` is unbounded but filtered by `next_run_at < NOW()`, which
-newly created schedules do not satisfy.
-
 Note the amplification: the pass issues one sequential `UPDATE` per BROKEN row, and "most rows
 broken" is precisely the scenario the sweep exists for - the release that lands a new validation
 rule. So the worst case for latency coincides with the case it was built to serve.

@@ -77,12 +77,23 @@ func (tr *sweepTracer) selectCount() int {
 // the sweep reports, so a broken instrument and a real failure would be
 // indistinguishable. Matching on the shape reports one before and three after.
 //
-// The three fragments together exclude the other statements the sweep's own pool
-// issues: RecordScheduledJobFailure is an UPDATE and names no FROM clause.
+// The three positive fragments together exclude the other statements the sweep's
+// own pool issues: RecordScheduledJobFailure is an UPDATE and names no FROM
+// clause.
+//
+// THE NEGATIVE FRAGMENT IS THE RECIPROCAL OF isReconcilePageRead'S NEEDLE.
+// ListOverdueScheduledJobsForCatchupPage satisfies all three positive fragments,
+// so a tracer that sees both startup passes counts its read here too without
+// this. The needle must be the whole predicate rather than the bare column name:
+// sqlc expands this statement's SELECT * into a column list that itself contains
+// next_run_at, so excluding on the column alone matches nothing at all.
+// TestSweepPageReadMatcherExcludesTheReconcilePageRead is what goes red either
+// way.
 func isSweepPageRead(sql string) bool {
 	return strings.Contains(sql, "FROM scheduled_jobs") &&
 		strings.Contains(sql, "WHERE enabled") &&
-		strings.Contains(sql, "ORDER BY id")
+		strings.Contains(sql, "ORDER BY id") &&
+		!strings.Contains(sql, "next_run_at < NOW()")
 }
 
 // tracedPool builds a second pool onto the SAME database the harness migrated,
@@ -93,7 +104,7 @@ func isSweepPageRead(sql string) bool {
 // and no change to runner_test.go. It also stays correct if the harness ever
 // moves from a container per test to one database per test on a shared server,
 // because the pool's own config names the per-test database by construction.
-func tracedPool(t *testing.T, h *runnerHarness, tr *sweepTracer) *pgxpool.Pool {
+func tracedPool(t *testing.T, h *runnerHarness, tr pgx.QueryTracer) *pgxpool.Pool {
 	t.Helper()
 	cfg := h.pool.Config()
 	cfg.ConnConfig.Tracer = tr
@@ -107,7 +118,7 @@ func tracedPool(t *testing.T, h *runnerHarness, tr *sweepTracer) *pgxpool.Pool {
 // validates, in ONE statement.
 //
 // next_run_at is far in the future for the reason TestValidateStoredSpecsOnStartup
-// gives: neither ListEligibleScheduledJobs nor ListOverdueScheduledJobsForCatchup
+// gives: neither ListEligibleScheduledJobs nor ListOverdueScheduledJobsForCatchupPage
 // can reach these rows, so a pass is attributable to the sweep.
 func seedBrokenSchedules(t *testing.T, h *runnerHarness, owner pgtype.UUID, n int) {
 	t.Helper()
@@ -227,4 +238,53 @@ func TestValidateStoredSpecsOnStartup_ACancelledSweepReturnsInsteadOfLoggingEver
 	// all would satisfy both assertions above.
 	require.Equal(t, 1, countRecordedFailures(t, h),
 		"exactly the one row processed before the cancellation must be recorded")
+}
+
+// TestSweepPageReadMatcherExcludesTheReconcilePageRead pins that isSweepPageRead
+// attributes a read to the sweep only, when both startup passes run through one
+// tracer.
+//
+// DRIVING ONE PASS ALONE CANNOT DISCRIMINATE. The reconcile's page read
+// satisfies all three of isSweepPageRead's fragments - FROM scheduled_jobs,
+// WHERE enabled, ORDER BY id - so a matcher with no reciprocal discriminator is
+// wrong only once a tracer sees both passes, which is what this test arranges.
+//
+// THE FIXTURE STAYS UNDER ONE PAGE so each pass issues exactly one page read and
+// the two candidate counts are 1 and 2. Paging itself is pinned above.
+//
+// BOTH POSITIVE ASSERTIONS ARE LOAD BEARING. A count of 1 is equally what a
+// reconcile that never reached its read would give, and what a sweep that never
+// reached its own would give if the reconcile's read were the one being counted.
+func TestSweepPageReadMatcherExcludesTheReconcilePageRead(t *testing.T) {
+	// One line per recorded failure. Nothing here reads them back; the capture
+	// only keeps them off the test output.
+	var discarded bytes.Buffer
+	captureLog(t, &discarded)
+
+	h := newRunnerHarness(t)
+	owner := h.createUser(t, "matcher-attribution@example.com")
+	seedOverdueSchedules(t, h, owner, "attribution-overdue-", "@hourly", 3)
+	seedBrokenSchedules(t, h, owner, 2)
+
+	tr := &sweepTracer{}
+	q := store.New(tracedPool(t, h, tr))
+
+	// BOUNDED FAILURE, so a pass that fails to terminate is a named timeout
+	// rather than a consumed package clock.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	require.NoError(t, schedrunner.ReconcileOnStartup(ctx, q))
+	require.NoError(t, schedrunner.ValidateStoredSpecsOnStartup(ctx, q))
+
+	require.Equal(t, 1, tr.selectCount(),
+		"the sweep issued one page read. 2 means isSweepPageRead also counted the reconcile's, "+
+			"which names the same three fragments")
+
+	require.Equal(t, 3, countAdvanced(t, h, "attribution-overdue-"),
+		"ANTI-VACUITY for the reconcile: unless its page read really went through this tracer, "+
+			"a count of 1 says nothing about exclusion")
+
+	require.Equal(t, 2, countRecordedFailures(t, h),
+		"ANTI-VACUITY for the sweep: the one counted read must be the sweep's own")
 }
