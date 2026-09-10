@@ -1,7 +1,11 @@
 package perforce
 
 import (
+	"fmt"
 	"testing"
+	"time"
+
+	relayv1 "relay/internal/proto/relayv1"
 
 	"github.com/stretchr/testify/require"
 )
@@ -76,4 +80,74 @@ func TestNew_AnUnsetEnvironmentStillCarriesTheCeiling(t *testing.T) {
 func TestExclusionCeiling_AZeroFieldMeansTheDefault(t *testing.T) {
 	require.Equal(t, defaultMaxExclusionSets, (&Provider{}).exclusionCeiling())
 	require.Equal(t, 9, (&Provider{maxExclusionSets: 9}).exclusionCeiling())
+}
+
+// entryFor builds a registry entry for one distinct exclusion set on stream,
+// so each call yields a distinct composite source key.
+func entryFor(t *testing.T, stream, tag, baseline string, lastUsed time.Time) WorkspaceEntry {
+	t.Helper()
+	key := SourceKey(&relayv1.PerforceSource{
+		Stream: stream,
+		Sync: []*relayv1.SyncEntry{
+			{Path: stream + "/...", Rev: "@100"},
+			{Path: fmt.Sprintf("%s/%s/...", stream, tag), Exclude: true},
+		},
+	})
+	return WorkspaceEntry{
+		ShortID:      "id-" + tag,
+		SourceKey:    key,
+		ClientName:   "relay_h_id-" + tag,
+		BaselineHash: baseline,
+		LastUsedAt:   lastUsed,
+	}
+}
+
+// AN UNSYNCED ENTRY IS THE VICTIM EVEN WHEN IT IS THE NEWER ONE. The
+// discriminating input is therefore an empty-baseline entry with the NEWER
+// timestamp against a synced entry with the older one: under pure LRU the synced
+// one is picked, which reclaims a workspace an operator paid to fill in order to
+// protect a failed prepare's residue.
+func TestExclusionEvictionCandidates_AnUnsyncedEntryOutranksAnOlderSyncedOne(t *testing.T) {
+	now := time.Now()
+	synced := entryFor(t, "//s/x", "synced", "bh-real", now.Add(-10*time.Hour))
+	unsynced := entryFor(t, "//s/x", "unsynced", "", now.Add(-1*time.Hour))
+
+	got := exclusionEvictionCandidates([]WorkspaceEntry{synced, unsynced}, "//s/x")
+
+	require.Len(t, got, 2)
+	require.Equal(t, unsynced.ShortID, got[0].ShortID,
+		"the residue of a failed prepare is reclaimed before any warm workspace")
+}
+
+// Within one baseline class the order is LRU.
+func TestExclusionEvictionCandidates_OrdersBySyncedThenLeastRecentlyUsed(t *testing.T) {
+	now := time.Now()
+	newest := entryFor(t, "//s/x", "c", "bh-real", now.Add(-1*time.Hour))
+	oldest := entryFor(t, "//s/x", "a", "bh-real", now.Add(-9*time.Hour))
+	middle := entryFor(t, "//s/x", "b", "bh-real", now.Add(-5*time.Hour))
+
+	got := exclusionEvictionCandidates([]WorkspaceEntry{newest, oldest, middle}, "//s/x")
+
+	require.Equal(t,
+		[]string{oldest.ShortID, middle.ShortID, newest.ShortID},
+		[]string{got[0].ShortID, got[1].ShortID, got[2].ShortID})
+}
+
+// THE DECOY GOES FIRST. The base entry is made the OLDEST and given a non-empty
+// baseline, so it sorts ahead of every composite under either ordering arm. A
+// list that can hold it hands a job author the outcome the ceiling exists to
+// deny: destroying the workspace every non-exclusion task on that stream shares.
+func TestExclusionEvictionCandidates_ExcludesTheBaseWorkspaceAndOtherStreams(t *testing.T) {
+	now := time.Now()
+	base := WorkspaceEntry{
+		ShortID: "id-base", SourceKey: "//s/x", ClientName: "relay_h_id-base",
+		BaselineHash: "bh-base", LastUsedAt: now.Add(-100 * time.Hour),
+	}
+	otherStream := entryFor(t, "//s/other", "z", "bh-real", now.Add(-99*time.Hour))
+	mine := entryFor(t, "//s/x", "a", "bh-real", now)
+
+	got := exclusionEvictionCandidates([]WorkspaceEntry{base, otherStream, mine}, "//s/x")
+
+	require.Len(t, got, 1, "only this stream's exclusion-derived entries are candidates")
+	require.Equal(t, mine.ShortID, got[0].ShortID)
 }

@@ -3,6 +3,7 @@ package perforce
 import (
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 )
 
@@ -81,4 +82,43 @@ func (p *Provider) exclusionCeiling() int {
 		return defaultMaxExclusionSets
 	}
 	return p.maxExclusionSets
+}
+
+// exclusionEvictionCandidates returns stream's exclusion-derived entries,
+// worst-first: an entry with no BaselineHash before any entry that has one, then
+// by LastUsedAt ascending.
+//
+// THE EMPTY BASELINE ARM IS NOT A TIE-BREAK. The cold path registers a workspace
+// with an empty baseline before anything is synced and the exclusion probe
+// refuses before the sync runs, so an empty baseline on an unheld entry is what
+// a failed bogus prepare leaves behind: an empty directory whose delete is free.
+// Ordering it ahead of LRU reclaims that residue before any warm workspace an
+// operator paid to fill. An entry left empty by an agent that died mid-sync is
+// re-synced by Prepare anyway, so evicting one loses transferred bytes and no
+// correctness. TestExclusionEvictionCandidates_AnUnsyncedEntryOutranksAnOlderSyncedOne
+// carries the discriminating input.
+//
+// THE BASE WORKSPACE CANNOT APPEAR HERE, because isExclusionKeyForStream is
+// false for a bare stream key. That is the single guard;
+// TestExclusionEvictionCandidates_ExcludesTheBaseWorkspaceAndOtherStreams makes
+// the base entry the oldest so a pure-LRU implementation picks it.
+//
+// It reads a snapshot and holds no lock, so nothing here can be a live pointer
+// into registry memory.
+func exclusionEvictionCandidates(snap []WorkspaceEntry, stream string) []WorkspaceEntry {
+	out := make([]WorkspaceEntry, 0, len(snap))
+	for _, e := range snap {
+		if isExclusionKeyForStream(e.SourceKey, stream) {
+			out = append(out, e)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		iUnsynced := out[i].BaselineHash == ""
+		jUnsynced := out[j].BaselineHash == ""
+		if iUnsynced != jUnsynced {
+			return iUnsynced
+		}
+		return out[i].LastUsedAt.Before(out[j].LastUsedAt)
+	})
+	return out
 }
