@@ -37,6 +37,30 @@ const (
 	maxWorkspaceBaselineHashBytes = 128
 )
 
+// maxInventoryRowsPerBatch bounds how many entries of ONE applyInventory batch
+// are processed. Entries past it are dropped from the TAIL and counted.
+//
+// IT TRUNCATES AND NEVER REFUSES THE BATCH. Returning an error rolls
+// ReplaceWorkerInventory's DELETE back with everything else, so the worker keeps
+// its previous rows and an agent reporting the same over-count inventory on every
+// registration never updates its inventory again. Which rows survive is the
+// agent's own ordering choice, and the whole payload was the agent's choice
+// already, so truncation grants it no capability it lacked.
+//
+// IT BOUNDS ONE TRANSACTION'S WORK, NOT THE TABLE'S SIZE. This path opens with a
+// full DELETE, so it cannot accumulate rows; the streaming per-message upsert
+// path is where a worker's row total can grow and it is not bounded here.
+//
+// THE ASYMMETRY PICKS THE NUMBER, which is why it sits far past physical
+// plausibility rather than near the honest maximum. Too high costs one large
+// transaction from a hostile agent. Too low silently and permanently removes real
+// workspaces from warm scoring for an honest agent, with no error anywhere.
+//
+// NO ENV KNOB, for the reason the byte bounds above give: an authenticated agent
+// drives the counter, and the remedy an operator reaches for on a climbing
+// counter - raise the bound - is the attack.
+const maxInventoryRowsPerBatch = 4096
+
 // errUnstorableInventoryRow is what inventoryUpsertParams returns for a row the
 // coordinator will not store.
 //

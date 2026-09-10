@@ -437,13 +437,28 @@ type Handler struct {
 	// working counter and there is no nil case anywhere. Read through
 	// InventoryRowRejections.
 	//
-	// A DISTINCT NOUN, and no input moves more than one of these counters. It
+	// A DISTINCT NOUN, and no ENTRY moves more than one of these counters. It
 	// counts ROWS REFUSED FOR CONTENT and nothing else - an accepted row moves it
 	// by zero, which is what
 	// TestInventoryRowRejections_CountsRefusalsAndNothingElse's second half pins.
 	// NOT YET ON GET /v1/server/counters - the section is deliberately deferred to
 	// docs/backlog/idea-2026-09-10-publish-inventory-row-rejection-counter.md.
 	inventoryRowRejects atomic.Uint64
+
+	// inventoryBatchOverflowDrops counts the workspace-inventory entries dropped
+	// from the TAIL of an over-count applyInventory batch. A VALUE, not a pointer,
+	// for the same reason its neighbours are. Read through
+	// InventoryBatchOverflowDrops.
+	//
+	// A DISTINCT NOUN from inventoryRowRejects above: that one counts rows refused
+	// for CONTENT, this one counts entries past a COUNT bound. They are disjoint
+	// per ENTRY because the truncation runs ahead of the upsert loop, so a dropped
+	// entry never reaches inventoryUpsertParams. One BATCH can move both, and
+	// neither number stands in for the other.
+	// TestInventoryCounters_OverflowAndContentRefusalAreSeparateNumbers.
+	// NOT YET ON GET /v1/server/counters - deferred to
+	// docs/backlog/idea-2026-09-10-publish-inventory-row-rejection-counter.md.
+	inventoryBatchOverflowDrops atomic.Uint64
 }
 
 // IngestLogDropCounts reports what this server's ingest log budget has dropped
@@ -496,6 +511,22 @@ func (h *Handler) TaskStatusFenceRejections() TaskStatusFenceCounts {
 // NOTHING READS IT YET, so that remedy is guidance for whoever wires it up
 // rather than something an operator can act on today; see the field above.
 func (h *Handler) InventoryRowRejections() uint64 { return h.inventoryRowRejects.Load() }
+
+// InventoryBatchOverflowDrops reports how many workspace-inventory entries this
+// server dropped from over-count registration batches since process start.
+//
+// AN AUTHENTICATED AGENT MOVES THIS NUMBER AT WILL, one increment per entry past
+// the bound, and this is the sentence to read before acting on it. It is
+// attributable to "some agent" and no further. THE REMEDY IS TO FIND WHICH AGENT
+// IS SENDING AN OVER-COUNT INVENTORY - never to raise the bound, which is what an
+// agent driving this number would want. Per PROCESS, monotonic, zeroed by a
+// restart, and never returned to an agent.
+//
+// NOTHING READS IT YET, so that remedy is guidance for whoever wires it up rather
+// than something an operator can act on today; see the field above.
+func (h *Handler) InventoryBatchOverflowDrops() uint64 {
+	return h.inventoryBatchOverflowDrops.Load()
+}
 
 // NewHandler returns a Handler wired to the given dependencies. pool is a
 // txBeginner, which *pgxpool.Pool satisfies; see that type for why.
@@ -2221,10 +2252,19 @@ func updateJobStatusFromTasks(ctx context.Context, q *store.Queries, jobID pgtyp
 
 // applyInventory does a transactional full-replace of workspace inventory for a
 // worker: deletes all existing rows, then inserts each non-deleted entry that
-// inventoryUpsertParams accepts. A refused entry is dropped from the batch and
-// the rest still commit; the error this returns is a store fault and nothing
-// else, which is what finishRegister's log-and-continue call site is for.
+// inventoryUpsertParams accepts, over at most maxInventoryRowsPerBatch entries.
+// A refused entry is dropped from the batch and an entry past the count bound is
+// dropped from its tail; the rest still commit, and the error this returns is a
+// store fault and nothing else, which is what finishRegister's log-and-continue
+// call site is for.
 func (h *Handler) applyInventory(ctx context.Context, workerID pgtype.UUID, inv []*relayv1.WorkspaceInventoryUpdate) error {
+	// TRUNCATE AHEAD OF THE TRANSACTION, never inside it and never as a refusal:
+	// see maxInventoryRowsPerBatch. Counted per ENTRY so the number is comparable
+	// with the per-row content refusals beside it.
+	if len(inv) > maxInventoryRowsPerBatch {
+		h.inventoryBatchOverflowDrops.Add(uint64(len(inv) - maxInventoryRowsPerBatch))
+		inv = inv[:maxInventoryRowsPerBatch]
+	}
 	return pgx.BeginTxFunc(ctx, h.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		q := h.q.WithTx(tx)
 		if err := q.ReplaceWorkerInventory(ctx, workerID); err != nil {
