@@ -187,8 +187,14 @@ func TestReconcileOnStartup_ReadsInPagesOfOneHundred(t *testing.T) {
 	// reads is also what a loop that asked each read for the whole table would
 	// report if it then discarded rows in Go, and peak resident bytes is the
 	// property this slice is about.
-	require.LessOrEqual(t, tr.widestPage(), int64(100),
-		"no single page read may return more than one page of rows")
+	//
+	// EXACTLY 100, NOT "AT MOST 100". The widest of three pages sized 100, 100
+	// and 50 is 100, so the exact form costs no coverage - and a bound alone is
+	// satisfied by a tracer reading 0, which is what an unpopulated CommandTag
+	// would give and is indistinguishable from a page read that never happened.
+	require.Equal(t, int64(100), tr.widestPage(),
+		"the widest single page read must be exactly one page: over 100 means the LIMIT is not "+
+			"the bound it claims to be, and 0 means this assertion is reading nothing at all")
 }
 
 // TestReconcileOnStartup_TerminatesWhenAStoredCronNoLongerParses pins that the
