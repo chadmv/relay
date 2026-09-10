@@ -257,35 +257,64 @@ Fill this block in, in the plan file, replacing every `<...>`. **A blank slot is
 ## Task 0 results
 
 M1 GATING - persisted client for a non-existent stream:
-    Lane ran (no SKIP):           <yes | no - reason>
-    p4 client -o -S <bogus>:      exit <N>; stdout <...>; stderr <...>
-    p4 client -i (if reached):    exit <N>; stdout <...>; stderr <...>
-    p4 clients -e <probe> after:  <client exists | no client>
-    VERDICT: <CANNOT be persisted - premise holds, proceed
-              | CAN be persisted - STOPPED, reported to conductor, no code written
-              | NOT MEASURED - reported to conductor, proceeded on <conductor's decision>>
+    Lane ran (no SKIP):           yes - p4 2026.1 on PATH, Docker Desktop 29.4.0, p4d image built,
+                                  container started, "p4d ready" observed, no --- SKIP
+    CONTROL (real //test/main):   p4 client -o -S //test/main relay_probe_real
+                                  exit 0; stdout = a full client spec (Stream: //test/main,
+                                  View: //test/main/... //relay_probe_real/...); stderr empty.
+                                  The instrument works: a real stream yields a spec.
+    p4 client -o -S <bogus>:      p4 client -o -S //test/no-such-stream-qqzz relay_probe_bogus
+                                  exit 1; stdout EMPTY; stderr: Stream '//test/no-such-stream-qqzz'
+                                  doesn't exist.
+    p4 client -i (if reached):    NOT REACHED. client -o produced no spec on stdout, so there was
+                                  nothing to pipe. The refusal is at the FIRST of the two calls.
+    p4 clients -e <probe> after:  no client (exit 0, stdout empty). p4 clients (unfiltered) lists
+                                  only the fixture's own `setup-client`, so the empty result is not
+                                  an artefact of the -e filter.
+    Production path:              Client.CreateStreamClient(ctx, "relay_probe_bogus_prod", tmp,
+                                  "//test/no-such-stream-qqzz", "", false) returns
+                                  `p4 client -o -S ... : exit status 1 (stderr: Stream '...'
+                                  doesn't exist.)`, and p4 clients -e relay_probe_bogus_prod is
+                                  empty afterwards.
+    VERDICT: CANNOT be persisted - premise holds, proceed.
 
-M2 Makefile lane: test-pg-integration names <./internal/agent | ./internal/agent/...>.
-    `go test -tags integration -list ".*" ./internal/agent` listed <N> tests; perforce names present: <yes|no>.
-    Branch taken for Task 8's comment: <points at startP4dContainer | no excuse needed>.
+M2 Makefile lane: test-pg-integration names ./internal/agent (bare), Makefile:168.
+    `go test -tags integration -list ".*" ./internal/agent` listed 84 tests; perforce names present: no.
+    Branch taken for Task 8's comment: points at startP4dContainer. The bare path is load-bearing
+    per the Makefile's own comment, so ./internal/agent/... must NOT be added.
 
-M3 grpc-go default receive limit: <N> bytes, google.golang.org/grpc <version>.
+M3 grpc-go default receive limit: 4194304 bytes (1024*1024*4,
+    defaultServerMaxReceiveMessageSize, server.go:60), google.golang.org/grpc v1.80.0.
 
-M4 fakeTx with 4098 entries: <accepted in <N>s | refused because <...>>.
+M4 fakeTx with 4098 entries: accepted. The fixture is in-memory only (fakeTx.Exec appends to a
+    slice), and the existing TestApplyInventory family runs in 0.086s; B1's own wall clock is
+    recorded in the verification block.
 
-M5 un-evictable seam: <the exact seam>. Other seams found: <none | ...>.
+M5 un-evictable seam: insert NewWorkspace(shortID) into p.workspaces under p.mu, then hold a handle
+    from w.Acquire(ctx, Request{SyncPaths: ...}) - TestEvictWorkspace_RefusesHeldWorkspace's seam,
+    which yields EvictWorkspace's "currently in use". Other seams found: one - setting
+    p.evicting[shortID] via ReserveForEvict and keeping the release closure, which yields "already
+    being evicted". The holder seam is the one Task 5 uses, because "held by a running task" is the
+    condition the refusal is documented against.
 
 M6 composite-key fixture search (hit counts):
-    "x1\|" <N>   "SourceKey(" <N>   "reg.Upsert|Registry{" <N>   "Exclude: true" <N>
-    Fixtures holding >=4 composite entries for one stream: <N - list them, or zero>
+    "x1\|" 3   "SourceKey(" 24   "reg.Upsert|Registry{" 56   "Exclude: true" 45
+    Fixtures holding >=4 composite entries for one stream: zero. Enumerated every `SourceKey:`
+    literal in the package's test files (15 distinct forms, 37 occurrences): all are bare streams
+    ("//s/x", "//s/y", "//s/a", "//s/b", "//s/good", "//s/bad", "//s/stuck", "//depot/main",
+    "//s/"+id, fmt.Sprintf("//s/%d")). None is composite. The three "x1|" hits are two assertions
+    and one comment, not seeded entries.
 
-M7 README anchors as of <date/sha>: "Exclusions change..." line <N>; RELAY_WORKSPACE_CLOBBER row line <N>;
-    "Active workspaces..." line <N>. Anchor text changed since the spec: <no | yes - what>.
+M7 README anchors as of 01deeadc: "Exclusions change..." line 599; RELAY_WORKSPACE_CLOBBER row
+    line 510; "Active workspaces..." line 609 (same line also carries "Admins can also evict on
+    demand via"). README is 2239 lines. Anchor text changed since the spec: no.
 
-M8 green baseline: perforce <ok, Ns>; worker <ok, Ns>; working tree <clean | ...>.
+M8 green baseline: perforce ok, 1.139s; worker ok, 3.737s; working tree clean
+    (git status --porcelain empty).
 
-Numbers in force for this slice: RELAY_WORKSPACE_MAX_EXCLUSION_SETS default <4 or revised>,
-hard maximum <64>, maxInventoryRowsPerBatch <4096>.
+Numbers in force for this slice: RELAY_WORKSPACE_MAX_EXCLUSION_SETS default 4,
+hard maximum 64, maxInventoryRowsPerBatch 4096.
+Migrations: highest is 000024_worker_workspace_text_bounds; this slice adds none.
 Unchanged by Task 0 regardless of result: the cold-branch enforcement point, evict-then-admit,
 no value disables the ceiling, two distinct counters.
 ```
