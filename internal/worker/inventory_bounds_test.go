@@ -99,3 +99,49 @@ func TestApplyInventory_AnOverLongSourceKeyIsDroppedAndTheBatchCommits(t *testin
 			"rollbacks == 0 instead would fail against correct code: pgx defers a rollback after a "+
 			"successful commit.")
 }
+
+// TestApplyInventory_EveryRefusedRowIsDroppedAndTheBatchStillCommits is the batch
+// half of its sibling table: it is not enough that the constructor refuses, the
+// loop must keep going. The refused entry is FIRST in every case, for the reason
+// its sibling gives.
+func TestApplyInventory_EveryRefusedRowIsDroppedAndTheBatchStillCommits(t *testing.T) {
+	nul := string(rune(0))
+	cases := []struct {
+		name string
+		bad  func(u *relayv1.WorkspaceInventoryUpdate)
+	}{
+		{"source_type over bound", func(u *relayv1.WorkspaceInventoryUpdate) { u.SourceType = strings.Repeat("Q", overLongKey) }},
+		{"source_key over bound", func(u *relayv1.WorkspaceInventoryUpdate) { u.SourceKey = strings.Repeat("Q", overLongKey) }},
+		{"short_id over bound", func(u *relayv1.WorkspaceInventoryUpdate) { u.ShortId = strings.Repeat("Q", overLongKey) }},
+		{"baseline_hash over bound", func(u *relayv1.WorkspaceInventoryUpdate) { u.BaselineHash = strings.Repeat("Q", overLongKey) }},
+		{"source_type with a NUL", func(u *relayv1.WorkspaceInventoryUpdate) { u.SourceType = "st" + nul + "perforce" }},
+		{"source_key with a NUL", func(u *relayv1.WorkspaceInventoryUpdate) { u.SourceKey = "//sk" + nul + "bad" }},
+		{"short_id with a NUL", func(u *relayv1.WorkspaceInventoryUpdate) { u.ShortId = "shid" + nul + "bad" }},
+		{"baseline_hash with a NUL", func(u *relayv1.WorkspaceInventoryUpdate) { u.BaselineHash = "bh" + nul + "bad" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, tx := newInventoryFixture(t)
+
+			bad := &relayv1.WorkspaceInventoryUpdate{
+				SourceType: "st-perforce", SourceKey: "//sk/bad", ShortId: "shid-bad",
+				BaselineHash: "bh-bad", LastUsedAt: "2026-09-10T12:00:00Z",
+			}
+			tc.bad(bad)
+			good := &relayv1.WorkspaceInventoryUpdate{
+				SourceType: "st-perforce", SourceKey: "//good/survivor", ShortId: "shid-survivor",
+				BaselineHash: "bh-survivor", LastUsedAt: "2026-09-10T12:00:01Z",
+			}
+
+			require.NoError(t, h.applyInventory(context.Background(), testWorkerID,
+				[]*relayv1.WorkspaceInventoryUpdate{bad, good}))
+
+			execs := tx.execsSeen()
+			require.Len(t, execs, 2, "the DELETE and exactly one upsert")
+			assert.Equal(t, "//good/survivor", execs[1].args[2],
+				"the surviving row must be the GOOD one, positionally")
+			commits, _ := tx.outcome()
+			assert.Equal(t, 1, commits, "and the batch must have committed")
+		})
+	}
+}

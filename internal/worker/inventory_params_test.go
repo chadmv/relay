@@ -116,3 +116,52 @@ func TestInventoryUpsertParams_SourceKeyIsBoundedInBytesNotRunes(t *testing.T) {
 		})
 	}
 }
+
+// TestInventoryUpsertParams_EveryAgentSuppliedStringIsBounded pins the boundary
+// on each column separately: exactly at the bound accepted, one byte over
+// refused. Only one field varies per case, so a case can fail for exactly one
+// reason.
+//
+// baseline_hash is here for correctness rather than tidiness: source_type,
+// source_key and baseline_hash share one worker_workspaces_lookup_idx entry, so
+// "no accepted row can fail an index" is false while any one of the three is
+// unbounded.
+func TestInventoryUpsertParams_EveryAgentSuppliedStringIsBounded(t *testing.T) {
+	cases := []struct {
+		column string
+		max    int
+		set    func(u *relayv1.WorkspaceInventoryUpdate, v string)
+	}{
+		{"source_type", maxWorkspaceSourceTypeBytes, func(u *relayv1.WorkspaceInventoryUpdate, v string) { u.SourceType = v }},
+		{"source_key", maxWorkspaceSourceKeyBytes, func(u *relayv1.WorkspaceInventoryUpdate, v string) { u.SourceKey = v }},
+		{"short_id", maxWorkspaceShortIDBytes, func(u *relayv1.WorkspaceInventoryUpdate, v string) { u.ShortId = v }},
+		{"baseline_hash", maxWorkspaceBaselineHashBytes, func(u *relayv1.WorkspaceInventoryUpdate, v string) { u.BaselineHash = v }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.column+" at the bound is accepted", func(t *testing.T) {
+			u := legalUpdate()
+			tc.set(u, strings.Repeat("Q", tc.max))
+			_, err := inventoryUpsertParams(testWorkerID, u)
+			require.NoError(t, err)
+		})
+		t.Run(tc.column+" one byte over is refused", func(t *testing.T) {
+			u := legalUpdate()
+			tc.set(u, strings.Repeat("Q", tc.max+1))
+			_, err := inventoryUpsertParams(testWorkerID, u)
+			require.Error(t, err, "REFUSAL is the property; the at-bound case above is what an "+
+				"absent bound also produces")
+			assert.True(t, errors.Is(err, errUnstorableInventoryRow))
+			assert.Contains(t, err.Error(), tc.column,
+				"the refusal must name the COLUMN, which is a compile-time literal, and nothing else")
+		})
+		t.Run(tc.column+" carrying a NUL is refused", func(t *testing.T) {
+			u := legalUpdate()
+			tc.set(u, "ok"+string(rune(0))+"ay")
+			_, err := inventoryUpsertParams(testWorkerID, u)
+			require.Error(t, err, "a NUL is legal in a proto3 string and illegal in TEXT "+
+				"(SQLSTATE 22021), so without this the row fails its statement instead")
+			assert.True(t, errors.Is(err, errUnstorableInventoryRow))
+			assert.Contains(t, err.Error(), tc.column)
+		})
+	}
+}

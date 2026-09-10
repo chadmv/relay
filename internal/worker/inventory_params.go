@@ -3,6 +3,7 @@ package worker
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	relayv1 "relay/internal/proto/relayv1"
@@ -25,9 +26,15 @@ import (
 //
 // source_type and source_key reach the primary key. source_type, source_key and
 // baseline_hash share one worker_workspaces_lookup_idx entry, so what has to fit
-// is their SUM rather than each separately.
+// is their SUM rather than each separately. short_id reaches neither index, so it
+// cannot produce the index failure this constructor was written for; it is
+// bounded because it is stored per row and echoed to admins, which makes an
+// unbounded one a row-size and response-size cost.
 const (
-	maxWorkspaceSourceKeyBytes = 512
+	maxWorkspaceSourceTypeBytes   = 64
+	maxWorkspaceSourceKeyBytes    = 512
+	maxWorkspaceShortIDBytes      = 128
+	maxWorkspaceBaselineHashBytes = 128
 )
 
 // errUnstorableInventoryRow is what inventoryUpsertParams returns for a row the
@@ -58,7 +65,16 @@ var errUnstorableInventoryRow = errors.New("inventory row is not storable")
 // Pinned by TestInventoryUpsertParams_MapsEveryFieldToItsOwnColumn and
 // TestInventoryUpsertParams_SourceKeyIsBoundedInBytesNotRunes.
 func inventoryUpsertParams(workerID pgtype.UUID, u *relayv1.WorkspaceInventoryUpdate) (store.UpsertWorkerWorkspaceParams, error) {
+	if err := checkStorableText("source_type", u.SourceType, maxWorkspaceSourceTypeBytes); err != nil {
+		return store.UpsertWorkerWorkspaceParams{}, err
+	}
 	if err := checkStorableText("source_key", u.SourceKey, maxWorkspaceSourceKeyBytes); err != nil {
+		return store.UpsertWorkerWorkspaceParams{}, err
+	}
+	if err := checkStorableText("short_id", u.ShortId, maxWorkspaceShortIDBytes); err != nil {
+		return store.UpsertWorkerWorkspaceParams{}, err
+	}
+	if err := checkStorableText("baseline_hash", u.BaselineHash, maxWorkspaceBaselineHashBytes); err != nil {
 		return store.UpsertWorkerWorkspaceParams{}, err
 	}
 	ts, _ := time.Parse(time.RFC3339, u.LastUsedAt)
@@ -72,11 +88,20 @@ func inventoryUpsertParams(workerID pgtype.UUID, u *relayv1.WorkspaceInventoryUp
 	}, nil
 }
 
-// checkStorableText refuses a string this table cannot hold. column and max are
-// compile-time literals and s never enters the returned error.
+// checkStorableText refuses a string this table cannot hold: over its column's
+// byte bound, or carrying a NUL. column and max are compile-time literals and s
+// never enters the returned error.
+//
+// A NUL is legal in a proto3 string and illegal in TEXT (SQLSTATE 22021). There
+// is no invalid-UTF-8 arm and there must not be one: proto.Unmarshal rejects a
+// proto3 string field carrying invalid UTF-8 and the stream dies before Connect's
+// message loop runs, so such a value cannot reach here over the wire.
 func checkStorableText(column, s string, max int) error {
 	if len(s) > max {
 		return fmt.Errorf("%w: %s exceeds %d bytes", errUnstorableInventoryRow, column, max)
+	}
+	if strings.IndexByte(s, 0) >= 0 {
+		return fmt.Errorf("%w: %s carries a NUL", errUnstorableInventoryRow, column)
 	}
 	return nil
 }
