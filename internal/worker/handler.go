@@ -442,7 +442,7 @@ type Handler struct {
 	// by zero, which is what
 	// TestInventoryRowRejections_CountsRefusalsAndNothingElse's second half pins.
 	// NOT YET ON GET /v1/server/counters - the section is deliberately deferred to
-	// its own item.
+	// docs/backlog/idea-2026-09-10-publish-inventory-row-rejection-counter.md.
 	inventoryRowRejects atomic.Uint64
 }
 
@@ -2259,11 +2259,11 @@ func (h *Handler) applyInventoryUpdate(ctx context.Context, workerID pgtype.UUID
 		// NO CONSTRUCTOR ON THIS ARM, AND THAT IS A DECISION RATHER THAN AN
 		// OVERSIGHT. A DELETE binds these values as COMPARISON keys, never as an
 		// index tuple, so the hazard the constructor closes is absent here. Refusing
-		// an over-long delete would additionally make any row stored before the bound
-		// existed agent-undeletable, because the admin evict path deletes a row only
-		// by way of the agent's confirming update; such rows are cleared by the next
-		// ReplaceWorkerInventory instead, which every reconnect runs. Pinned by
-		// TestApplyInventoryUpdate_TheDeleteArmHasNoBound.
+		// an over-long delete would additionally put any row stored before the bound
+		// existed out of reach of the agent's own per-row delete, because the admin
+		// evict path deletes a row only by way of the agent's confirming update; such
+		// rows are cleared by the next ReplaceWorkerInventory instead, which every
+		// reconnect runs. Pinned by TestApplyInventoryUpdate_TheDeleteArmHasNoBound.
 		return h.q.DeleteWorkerWorkspace(ctx, store.DeleteWorkerWorkspaceParams{
 			WorkerID: workerID, SourceType: u.SourceType, SourceKey: u.SourceKey,
 		})
