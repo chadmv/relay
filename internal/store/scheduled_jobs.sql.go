@@ -636,17 +636,15 @@ type ListOverdueScheduledJobsForCatchupPageRow struct {
 // red if a column comes back.
 //
 // NO FENCE ON THE ADVANCE, unlike RecordScheduledJobFailure beside it, and the
-// difference is what each statement writes. That one writes a VERDICT about
+// difference is what a stale write costs. That one writes a VERDICT about
 // content it read, so a stale write is a false alarm on a repaired schedule.
-// This one writes a VALUE computed from cron_expr and timezone, so two replicas
-// reconciling the same row write the same value and there is nothing to be
-// stale about. What replaces the fence is idempotence across replicas plus
-// self-healing on the next fire, since fireOne recomputes from the row's current
-// cron. A PATCH landing between this read and the advance can still have its
-// freshly computed next_run_at clobbered by one derived from the pre-patch cron;
-// that residual is bounded at one fire, and a fence would be worse - a fenced
-// non-match SKIPS the advance, and a row left overdue produces exactly the one
-// spurious fire the never-catch-up policy forbids.
+// What replaces the fence here is self-healing on the next fire, since fireOne
+// recomputes next_run_at from the row's current cron. A PATCH landing between
+// this read and the advance can still have its freshly computed next_run_at
+// clobbered by one derived from the pre-patch cron; that residual is bounded at
+// one fire, and a fence would be worse - a fenced non-match SKIPS the advance,
+// and a row left overdue produces exactly the one spurious fire the
+// never-catch-up policy forbids.
 //
 //	SELECT id, name, cron_expr, timezone FROM scheduled_jobs
 //	 WHERE enabled
