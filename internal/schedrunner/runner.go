@@ -21,6 +21,26 @@ const TickInterval = 10 * time.Second
 // BatchLimit caps rows scanned per tick.
 const BatchLimit = 100
 
+// reconcilePageSize is how many rows ReconcileOnStartup holds at once.
+//
+// IT IS NEITHER BatchLimit NOR sweepPageSize AND MUST NOT BE ALIASED TO EITHER.
+// BatchLimit governs how many rows one tick holds LOCKED, since
+// ListEligibleScheduledJobs is FOR UPDATE SKIP LOCKED inside a transaction;
+// sweepPageSize governs the startup sweep's peak resident bytes; this one
+// governs the reconcile's round-trip granularity. Three independent policies
+// behind one number makes two of the three comments false the first time any of
+// them moves.
+//
+// THE VALUE MATCHES THE OTHER TWO ON PURPOSE. With the column list narrowed to
+// four, no statement on the boot path holds more rows at once than any other, so
+// a reader reasoning about boot memory has one number to hold rather than three.
+//
+// A CONSTANT, NOT AN ENV VAR, for sweepPageSize's reason: the
+// configurable-timeout convention is about waits whose right value depends on
+// the operator's data, and no operator has information the code lacks about how
+// many rows to hold at once.
+const reconcilePageSize = 100
+
 // Runner owns the scheduled-job polling loop.
 type Runner struct {
 	pool *pgxpool.Pool
@@ -240,27 +260,92 @@ func (r *Runner) advanceNextRun(ctx context.Context, q *store.Queries, row store
 }
 
 // ReconcileOnStartup advances next_run_at past any missed triggers for every
-// enabled schedule, implementing the never-catch-up policy. Call after
+// OVERDUE enabled schedule, implementing the never-catch-up policy. Call after
 // migrations but before Runner.Run() starts.
+//
+// THE PREDICATE IS OVERDUE-ENABLED, not every enabled schedule: the statement
+// filters on next_run_at < NOW(). A pass over WHERE enabled alone would be a
+// full-table pass rewriting next_run_at on schedules that missed nothing.
+//
+// IT PAGES TO EXHAUSTION AND LEAVES NO REMAINDER. There is no ceiling on the
+// number of pages, deliberately. A ceiling leaves rows overdue, and
+// ListEligibleScheduledJobs then fires each of them once within TickInterval -
+// one job per remainder schedule, for a firing never-catch-up exists to skip,
+// which is the opposite of what README promises an operator. The only truncation
+// is a cancelled boot, and that remainder has nowhere to go and needs nowhere:
+// ctx at the call site is signal.NotifyContext, so a cancellation means the
+// process is already exiting and the next boot's reconcile owns those rows.
+//
+// PEAK MEMORY IS ONE PAGE OF FOUR NARROW COLUMNS. THE DURATION IS BOUNDED BY
+// NOTHING - one round trip per page plus one UPDATE per overdue row, all of it
+// ahead of srv.ListenAndServe(). Paging bounds the allocation and not the
+// duration, the same trade ValidateStoredSpecsOnStartup makes.
+//
+// A PER-ROW FAILURE MUST NOT STOP THE BOOT. A cron that no longer parses is
+// logged and skipped WITHOUT advancing next_run_at, so the row stays overdue and
+// ListEligibleScheduledJobs picks it up at most TickInterval later, where
+// fireOne's own ParseSchedule failure records it; ValidateStoredSpecsOnStartup's
+// header carries that reasoning. An UPDATE that fails is logged. Two things ARE
+// returned - a page query's error, and the cancellation the row loop checks for
+// - and the caller in cmd/relay-server logs either as a warning.
+//
+// now IS CAPTURED ONCE, above the page loop, because it is the never-catch-up
+// reference instant: every row's advance derives from the same boot instant
+// rather than from where the row happened to land in id order. The SQL NOW() in
+// the predicate floats per page, and the asymmetry is deliberate. Its
+// consequence, so it is not mistaken for a defect: on a long pass a
+// short-interval schedule can be advanced to a time already past and stay
+// overdue, and the ticker then fires it once. That is one fire rather than one
+// per missed trigger, and the id cursor makes revisiting it within this pass
+// impossible.
 func ReconcileOnStartup(ctx context.Context, q *store.Queries) error {
-	rows, err := q.ListOverdueScheduledJobsForCatchup(ctx)
-	if err != nil {
-		return err
-	}
+	var (
+		cursor    pgtype.UUID
+		cursorSet bool
+	)
 	now := time.Now()
-	for _, row := range rows {
-		sched, err := ParseSchedule(row.CronExpr, row.Timezone)
+	for {
+		rows, err := q.ListOverdueScheduledJobsForCatchupPage(ctx, store.ListOverdueScheduledJobsForCatchupPageParams{
+			CursorSet: cursorSet,
+			CursorID:  cursor,
+			PageLimit: reconcilePageSize,
+		})
 		if err != nil {
-			log.Printf("schedrunner: reconcile skip for %s: %v", row.Name, err)
-			continue
+			return err
 		}
-		next := sched.Next(now)
-		if err := q.AdvanceScheduledJobNextRun(ctx, store.AdvanceScheduledJobNextRunParams{
-			ID:        row.ID,
-			NextRunAt: pgtype.Timestamptz{Time: next, Valid: true},
-		}); err != nil {
-			log.Printf("schedrunner: reconcile advance for %s: %v", row.Name, err)
+		for _, row := range rows {
+			// A CANCELLED PASS RETURNS RATHER THAN RUNNING ON. Every remaining row
+			// would otherwise reach AdvanceScheduledJobNextRun, get context canceled
+			// back and log its own line - one per row, unconditionally, because this
+			// loop issues an UPDATE for every row rather than for broken rows only.
+			// At the top of the ROW loop rather than the page loop, since one page is
+			// already up to reconcilePageSize lines. RETURN rather than break, so the
+			// caller names the cause once instead of reporting a clean pass.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			sched, err := ParseSchedule(row.CronExpr, row.Timezone)
+			if err != nil {
+				log.Printf("schedrunner: reconcile skip for %s: %v", row.Name, err)
+				continue
+			}
+			next := sched.Next(now)
+			if err := q.AdvanceScheduledJobNextRun(ctx, store.AdvanceScheduledJobNextRunParams{
+				ID:        row.ID,
+				NextRunAt: pgtype.Timestamptz{Time: next, Valid: true},
+			}); err != nil {
+				log.Printf("schedrunner: reconcile advance for %s: %v", row.Name, err)
+			}
 		}
+		// A SHORT PAGE IS THE END, not an empty one. On a table whose overdue count
+		// is an exact multiple of reconcilePageSize this costs one empty round trip;
+		// breaking on an empty page costs the same trip on every table and reads as
+		// if a full page could be the last one.
+		if len(rows) < reconcilePageSize {
+			break
+		}
+		cursor = rows[len(rows)-1].ID
+		cursorSet = true
 	}
 	return nil
 }

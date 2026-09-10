@@ -93,7 +93,7 @@ func isSweepPageRead(sql string) bool {
 // and no change to runner_test.go. It also stays correct if the harness ever
 // moves from a container per test to one database per test on a shared server,
 // because the pool's own config names the per-test database by construction.
-func tracedPool(t *testing.T, h *runnerHarness, tr *sweepTracer) *pgxpool.Pool {
+func tracedPool(t *testing.T, h *runnerHarness, tr pgx.QueryTracer) *pgxpool.Pool {
 	t.Helper()
 	cfg := h.pool.Config()
 	cfg.ConnConfig.Tracer = tr
