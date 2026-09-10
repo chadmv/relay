@@ -183,9 +183,12 @@ func holdAll(t *testing.T, p *Provider, entries []WorkspaceEntry) {
 // os.MkdirAll on the workspace root runs before either, so the directory is the
 // earliest artifact of all.
 //
-// Every slot is held by a running task, which is the only state in which this
-// control refuses at all. The client -d fixtures are registered so a mutant that
-// deletes a held workspace anyway is caught by the count, not by a fixture miss.
+// Every slot is held by a running task, which is the state this control refuses
+// in and the one an operator will actually meet. It is not the only way an
+// eviction can fail - a p4 or disk fault reaches the same refusal - which is why
+// the message says none could be reclaimed rather than naming a cause.
+// The client -d fixtures are registered so a mutant that deletes a held
+// workspace anyway is caught by the count, not by a fixture miss.
 func TestProvider_TheCeilingRefusesWhenEverySlotIsHeld(t *testing.T) {
 	t.Setenv(maxExclusionSetsEnv, "4")
 	root := t.TempDir()

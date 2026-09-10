@@ -19,7 +19,8 @@ const maxExclusionSetsEnv = "RELAY_WORKSPACE_MAX_EXCLUSION_SETS"
 // full-size workspace, so this number multiplies disk directly - which is the
 // reason not to default it higher.
 //
-// 64: the knob only ever LOOSENS a control, so it needs a bound of its own.
+// 64: a higher value weakens this control, so the upward direction needs a bound
+// of its own. A lower one only tightens it and needs none.
 const (
 	defaultMaxExclusionSets = 4
 	maxMaxExclusionSets     = 64
