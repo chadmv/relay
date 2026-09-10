@@ -537,11 +537,6 @@ func TestFinishRegister_AppliesInventoryEvenWhenTheAgentReportsNone(t *testing.T
 // Turning that log.Printf into a return is a plausible edit - it looks like
 // error handling - and it would make a workspace-inventory hiccup refuse an
 // agent's registration outright.
-//
-// The injected error is the one from the open
-// bug-2026-08-23-applyinventory-null-timestamp item, because this seam is what
-// makes that bug cheaply reproducible for the first time. Fixing it is NOT this
-// slice's job; the item stays open.
 func TestFinishRegister_SucceedsWhenTheInventoryTransactionFails(t *testing.T) {
 	f := newSuccessFixture(t)
 	workerID := uuidStr(strandWorkerID)

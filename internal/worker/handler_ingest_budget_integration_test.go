@@ -338,11 +338,20 @@ func TestHandleTaskStatus_MalformedTaskIdsAreLoggedOncePerConnectionAndClipped(t
 // inventoryFloodStream returns a fakeStream that registers with a real agent
 // token and then sends n WorkspaceInventoryUpdates that cannot persist.
 //
-// A NUL in source_key fails at bind time (source_key is TEXT NOT NULL,
-// migration 000007). If that route ever stops erroring, the equally reachable
-// alternative is LastUsedAt: "" - applyInventoryUpdate swallows the time.Parse
-// error and binds SQL NULL into last_used_at, which is also NOT NULL. Either
-// way it is one error per message with no gate ahead of it.
+// THE DELETE ARM IS WHAT THESE TESTS DRIVE, AND THE CHOICE IS FORCED. What this
+// fixture needs is a genuine STORE FAULT reaching handleInventoryUpdate's
+// budgeted line, one per message, with no gate ahead of it. The upsert arm no
+// longer supplies one: inventoryUpsertParams refuses an over-long value, a NUL
+// and an unstorable last_used_at ahead of the statement, and handleInventoryUpdate
+// returns on that sentinel before spending a token. The delete arm has no such
+// gate, deliberately - it binds these values as comparison keys rather than as an
+// index tuple - so a NUL in source_key still fails at bind time (source_key is
+// TEXT NOT NULL, migration 000007) and still costs exactly one error per message.
+//
+// These tests are about the ingest log BUDGET rather than about what is storable,
+// so re-pointing the instrument at the path that still faults keeps their subject
+// intact. A build where nothing errored would produce zero lines, which is what
+// their assertions of exactly one and exactly two distinguish.
 func inventoryFloodStream(ctx context.Context, hostname, rawToken string, n int) *fakeStream {
 	msgs := []*relayv1.AgentMessage{{
 		Payload: &relayv1.AgentMessage_Register{
@@ -361,6 +370,7 @@ func inventoryFloodStream(ctx context.Context, hostname, rawToken string, n int)
 					ShortId:      "s",
 					BaselineHash: "b",
 					LastUsedAt:   time.Now().UTC().Format(time.RFC3339),
+					Deleted:      true,
 				},
 			},
 		})

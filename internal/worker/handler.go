@@ -392,7 +392,7 @@ type Handler struct {
 	// cmd/relay-server's buildHTTPServer under its OWN section and its OWN
 	// CounterSources field.
 	//
-	// A DIFFERENT NOUN FROM ingestDrops, and neither number covers any part of
+	// A DISTINCT NOUN FROM ingestDrops, and neither number covers any part of
 	// the other. ingestDrops counts LOG LINES THE BUDGET DROPPED; this counts
 	// CHUNKS THE FENCE REJECTED, on an arm that never consults the budget at all.
 	// No input moves both. Do not sum them and do not merge the sections.
@@ -416,19 +416,34 @@ type Handler struct {
 	// wired to GET /v1/server/counters by cmd/relay-server's buildHTTPServer
 	// under its OWN section and its OWN CounterSources field.
 	//
-	// A THIRD DISTINCT NOUN. ingestDrops counts LOG LINES THE BUDGET DROPPED;
+	// A DISTINCT NOUN AGAIN. ingestDrops counts LOG LINES THE BUDGET DROPPED;
 	// taskLogFenceRejects counts LOG CHUNKS AppendTaskLog's fence rejected; this
 	// counts STATUS REPORTS the status fence rejected. No input moves more than
-	// one of the three. Do not sum them and do not merge the sections.
+	// one of them. Do not sum them and do not merge the sections.
 	statusFence statusFenceCounters
 
 	// enrollmentRefusals counts what the two enrollment guards refused, split by
 	// cause. A VALUE, not a pointer, for the same reason its three neighbours are.
 	//
-	// A FOURTH DISTINCT NOUN, and no input moves more than one of the four. Read
+	// A DISTINCT NOUN, and no input moves more than one of these counters. Read
 	// through EnrollmentRefusals. NOT YET ON GET /v1/server/counters - the section
-	// is deliberately deferred to its own item; see the plan's scope decision.
+	// is deliberately deferred to its own item.
 	enrollmentRefusals enrollmentRefusalCounters
+
+	// inventoryRowRejects counts the workspace-inventory rows inventoryUpsertParams
+	// refused: over a column's byte bound, carrying a NUL, or with a last_used_at
+	// that cannot be stored. A VALUE, not a pointer, for the same reason its
+	// neighbours are: the zero value works, so a bare &Handler{} in a test has a
+	// working counter and there is no nil case anywhere. Read through
+	// InventoryRowRejections.
+	//
+	// A DISTINCT NOUN, and no input moves more than one of these counters. It
+	// counts ROWS REFUSED FOR CONTENT and nothing else - an accepted row moves it
+	// by zero, which is what
+	// TestInventoryRowRejections_CountsRefusalsAndNothingElse's second half pins.
+	// NOT YET ON GET /v1/server/counters - the section is deliberately deferred to
+	// docs/backlog/idea-2026-09-10-publish-inventory-row-rejection-counter.md.
+	inventoryRowRejects atomic.Uint64
 }
 
 // IngestLogDropCounts reports what this server's ingest log budget has dropped
@@ -467,6 +482,20 @@ func (h *Handler) EnrollmentRefusals() EnrollmentRefusalCounts { return h.enroll
 func (h *Handler) TaskStatusFenceRejections() TaskStatusFenceCounts {
 	return h.statusFence.snapshot()
 }
+
+// InventoryRowRejections reports how many agent-reported workspace-inventory rows
+// this server refused as unstorable since process start, across every worker.
+//
+// AN AUTHENTICATED AGENT MOVES THIS NUMBER AT WILL, one increment per inventory
+// entry per message, and this is the sentence to read before acting on it. It is
+// attributable to "some agent" and no further. THE REMEDY IS TO FIND WHICH AGENT
+// IS SENDING MALFORMED INVENTORY - never to raise a bound, which is what an agent
+// driving this number would want. Per PROCESS, monotonic, zeroed by a restart,
+// and never returned to an agent.
+//
+// NOTHING READS IT YET, so that remedy is guidance for whoever wires it up
+// rather than something an operator can act on today; see the field above.
+func (h *Handler) InventoryRowRejections() uint64 { return h.inventoryRowRejects.Load() }
 
 // NewHandler returns a Handler wired to the given dependencies. pool is a
 // txBeginner, which *pgxpool.Pool satisfies; see that type for why.
@@ -2190,8 +2219,11 @@ func updateJobStatusFromTasks(ctx context.Context, q *store.Queries, jobID pgtyp
 	return status
 }
 
-// applyInventory does a transactional full-replace of workspace inventory for
-// a worker: deletes all existing rows, then inserts each non-deleted entry.
+// applyInventory does a transactional full-replace of workspace inventory for a
+// worker: deletes all existing rows, then inserts each non-deleted entry that
+// inventoryUpsertParams accepts. A refused entry is dropped from the batch and
+// the rest still commit; the error this returns is a store fault and nothing
+// else, which is what finishRegister's log-and-continue call site is for.
 func (h *Handler) applyInventory(ctx context.Context, workerID pgtype.UUID, inv []*relayv1.WorkspaceInventoryUpdate) error {
 	return pgx.BeginTxFunc(ctx, h.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		q := h.q.WithTx(tx)
@@ -2202,15 +2234,18 @@ func (h *Handler) applyInventory(ctx context.Context, workerID pgtype.UUID, inv 
 			if u.Deleted {
 				continue
 			}
-			ts, _ := time.Parse(time.RFC3339, u.LastUsedAt) // blank → zero time
-			if err := q.UpsertWorkerWorkspace(ctx, store.UpsertWorkerWorkspaceParams{
-				WorkerID:     workerID,
-				SourceType:   u.SourceType,
-				SourceKey:    u.SourceKey,
-				ShortID:      u.ShortId,
-				BaselineHash: u.BaselineHash,
-				LastUsedAt:   pgtype.Timestamptz{Time: ts, Valid: !ts.IsZero()},
-			}); err != nil {
+			p, err := inventoryUpsertParams(workerID, u)
+			if err != nil {
+				h.inventoryRowRejects.Add(1)
+				// DROP THE ROW, DO NOT FAIL THE BATCH. Returning here rolls
+				// ReplaceWorkerInventory's DELETE back with everything else, so the
+				// worker keeps the rows it had and an agent that reports the same bad
+				// row on every registration never updates its inventory again. The
+				// dropped workspace is invisible to the dispatcher's warm scoring, and
+				// that degradation is bounded to that one workspace.
+				continue
+			}
+			if err := q.UpsertWorkerWorkspace(ctx, p); err != nil {
 				return err
 			}
 		}
@@ -2218,22 +2253,30 @@ func (h *Handler) applyInventory(ctx context.Context, workerID pgtype.UUID, inv 
 	})
 }
 
-// applyInventoryUpdate upserts or deletes a single workspace inventory row.
+// applyInventoryUpdate upserts or deletes a single workspace inventory row. The
+// upsert arm goes through inventoryUpsertParams; a refused row issues no
+// statement and returns errUnstorableInventoryRow, which the caller uses to tell
+// a refusal from a store fault.
 func (h *Handler) applyInventoryUpdate(ctx context.Context, workerID pgtype.UUID, u *relayv1.WorkspaceInventoryUpdate) error {
 	if u.Deleted {
+		// NO CONSTRUCTOR ON THIS ARM, AND THAT IS A DECISION RATHER THAN AN
+		// OVERSIGHT. A DELETE binds these values as COMPARISON keys, never as an
+		// index tuple, so the hazard the constructor closes is absent here. Refusing
+		// an over-long delete would additionally put any row stored before the bound
+		// existed out of reach of the agent's own per-row delete, because the admin
+		// evict path deletes a row only by way of the agent's confirming update; such
+		// rows are cleared by the next ReplaceWorkerInventory instead, which every
+		// reconnect runs. Pinned by TestApplyInventoryUpdate_TheDeleteArmHasNoBound.
 		return h.q.DeleteWorkerWorkspace(ctx, store.DeleteWorkerWorkspaceParams{
 			WorkerID: workerID, SourceType: u.SourceType, SourceKey: u.SourceKey,
 		})
 	}
-	ts, _ := time.Parse(time.RFC3339, u.LastUsedAt)
-	return h.q.UpsertWorkerWorkspace(ctx, store.UpsertWorkerWorkspaceParams{
-		WorkerID:     workerID,
-		SourceType:   u.SourceType,
-		SourceKey:    u.SourceKey,
-		ShortID:      u.ShortId,
-		BaselineHash: u.BaselineHash,
-		LastUsedAt:   pgtype.Timestamptz{Time: ts, Valid: !ts.IsZero()},
-	})
+	p, err := inventoryUpsertParams(workerID, u)
+	if err != nil {
+		h.inventoryRowRejects.Add(1)
+		return err
+	}
+	return h.q.UpsertWorkerWorkspace(ctx, p)
 }
 
 // handleInventoryUpdate applies one workspace inventory update and reports a
@@ -2241,24 +2284,36 @@ func (h *Handler) applyInventoryUpdate(ctx context.Context, workerID pgtype.UUID
 //
 // It exists as a named method rather than an inline block in Connect so that the
 // budgeted path is testable at the same layer as handleTaskLog and
-// handleTaskStatus, and so the log line has an owner. It adds no logic.
+// handleTaskStatus, and so the log line has an owner.
 //
-// This line needs the budget for the same reason the other three do, and it is
-// the CHEAPEST of the four for an attacker: every string in u is bound straight
-// into UpsertWorkerWorkspace or DeleteWorkerWorkspace, whose source_type,
-// source_key, short_id and baseline_hash columns are all TEXT NOT NULL, so a NUL
-// byte in any of them fails during bind-parameter conversion. And no NUL is even
-// needed: applyInventoryUpdate swallows the time.Parse error on u.LastUsedAt, so
-// an empty string binds SQL NULL into last_used_at, which is also NOT NULL. One
-// error per message either way, with no gate ahead of it.
+// THE TWO ARMS NO LONGER SHARE A SHAPE. The upsert arm goes through
+// inventoryUpsertParams, which refuses an over-long value, a NUL, or a
+// last_used_at that will not store - so a row that used to reach the database and
+// fail its statement is refused ahead of it, costs no round trip, and returns
+// early below without spending a token. The DELETE arm has no such gate and needs
+// none: it binds these values as comparison keys rather than as index tuples.
+// That arm is therefore what is left of the cheap-for-an-attacker path, and it is
+// what TestConnect_InventoryPersistFailuresAreBoundedPerConnection drives.
+//
+// What still reaches the budgeted line from the upsert arm is a genuine store
+// fault, which is not peer-chosen and is what the budget exists for.
 //
 // Key is kindInventory with NO wire value: a persist failure here is an episode,
 // not a per-workspace event, and keying on the source key would multiply one
-// infra event by the workspace count. Never log u itself - source_key is a
-// caller-supplied, unbounded depot path.
+// infra event by the workspace count. NEVER LOG u ITSELF - source_key is a
+// caller-supplied depot path, unbounded on the wire whatever this server will
+// store - and that rule now holds one layer further out too: the refusal
+// inventoryUpsertParams returns carries a column name and a bound and never the
+// value, so even a caller that renders it cannot be logged into by an agent.
 func (h *Handler) handleInventoryUpdate(ctx context.Context, workerID pgtype.UUID, lim *ingestLogLimiter, u *relayv1.WorkspaceInventoryUpdate) {
 	err := h.applyInventoryUpdate(ctx, workerID, u)
 	if err == nil {
+		return
+	}
+	// A REFUSED ROW IS COUNTED, NEVER LOGGED. It is fully agent-chosen and
+	// unboundedly repeatable, so a token spent here is one this connection's other
+	// diagnostics no longer have. InventoryRowRejections is the signal.
+	if errors.Is(err, errUnstorableInventoryRow) {
 		return
 	}
 	if lim.allow(logKey{kind: kindInventory}) {

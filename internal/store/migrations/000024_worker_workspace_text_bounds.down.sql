@@ -1,0 +1,4 @@
+ALTER TABLE worker_workspaces DROP CONSTRAINT worker_workspaces_baseline_hash_len_check;
+ALTER TABLE worker_workspaces DROP CONSTRAINT worker_workspaces_short_id_len_check;
+ALTER TABLE worker_workspaces DROP CONSTRAINT worker_workspaces_source_key_len_check;
+ALTER TABLE worker_workspaces DROP CONSTRAINT worker_workspaces_source_type_len_check;
