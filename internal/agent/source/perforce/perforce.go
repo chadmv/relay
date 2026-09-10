@@ -121,6 +121,11 @@ type Provider struct {
 	workspaces map[string]*Workspace // keyed by short_id
 	evicting   map[string]bool       // short_ids reserved by an in-flight EvictWorkspace; guarded by mu
 	reg        *Registry             // cached; loaded lazily
+
+	// maxExclusionSets is the resolved per-stream ceiling on exclusion-derived
+	// workspaces. Per-provider rather than a package var so a test needs no
+	// global mutation and no t.Cleanup restore. Read through exclusionCeiling.
+	maxExclusionSets int
 }
 
 // New creates a Provider. cfg.Client may be nil (will use real p4).
@@ -129,7 +134,12 @@ func New(cfg Config) *Provider {
 		cfg.Client = NewClient()
 	}
 	cfg.Hostname = sanitizeHostname(cfg.Hostname)
-	return &Provider{cfg: cfg, workspaces: map[string]*Workspace{}, evicting: map[string]bool{}}
+	return &Provider{
+		cfg:              cfg,
+		workspaces:       map[string]*Workspace{},
+		evicting:         map[string]bool{},
+		maxExclusionSets: newMaxExclusionSets(os.Getenv),
+	}
 }
 
 func (p *Provider) Type() string { return "perforce" }
@@ -295,6 +305,15 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	if found {
 		shortID = existing.ShortID
 	} else {
+		// COLD ONLY, and the placement is the control. See
+		// admitExclusionWorkspace: above this branch, or inside allocateShortID
+		// where the found/not-found distinction is invisible, every warm prepare
+		// is gated too. It holds no workspace handle and no lock here, so a
+		// refusal has nothing to release.
+		// TestProvider_AWarmExclusionPrepareAtTheCeilingIsNotGated.
+		if err := p.admitExclusionWorkspace(ctx, reg, sourceKey, pf.GetStream(), progress); err != nil {
+			return nil, err
+		}
 		shortID = allocateShortID(sourceKey, reg)
 	}
 	wsRoot := filepath.Join(p.cfg.Root, shortID)

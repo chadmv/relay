@@ -116,3 +116,47 @@ func TestSourceKey_ATrailingEllipsisIsPartOfTheString(t *testing.T) {
 	require.NotEqual(t, file, tree,
 		"two exclusions that preempt different filespecs must not share a workspace")
 }
+
+// THE DISCRIMINATING INPUT IS A STREAM THAT ENDS WITH "|" FOLLOWED BY ANOTHER
+// STREAM. A "|" is legal in a stream - validateSourceSpec asks only for a "//"
+// prefix and no control byte - so a suffix-only predicate counts the longer
+// stream's composite key against the shorter stream, and a ceiling counting
+// through it evicts and refuses on a population that is not its own.
+//
+// The suffix premise is asserted FIRST. Without it this test stops
+// discriminating the moment the encoding changes, and reads as passing.
+func TestIsExclusionKeyForStream_IsExactAgainstAStreamContainingAPipe(t *testing.T) {
+	const outer = "//depot/a|//depot/b"
+	const inner = "//depot/b"
+
+	key := SourceKey(&relayv1.PerforceSource{
+		Stream: outer,
+		Sync: []*relayv1.SyncEntry{
+			{Path: outer + "/...", Rev: "#head"},
+			{Path: outer + "/heavy/...", Exclude: true},
+		},
+	})
+
+	require.True(t, strings.HasSuffix(key, "|"+inner),
+		"the input only discriminates if a suffix-only predicate WOULD have matched")
+
+	require.True(t, isExclusionKeyForStream(key, outer),
+		"the key must be counted for the stream it was built from")
+	require.False(t, isExclusionKeyForStream(key, inner),
+		"and never for a shorter stream its encoding happens to end with")
+}
+
+// The base workspace is outside the population BY CONSTRUCTION, and this is the
+// single guard for that. A ceiling that counted the bare stream key, or that
+// could pick it as an eviction candidate, lets a job author with a handful of
+// junk exclusion sets destroy the workspace every non-exclusion task on that
+// stream shares.
+//
+// The third row is the same byte length the encoding produces for "//s/x", so it
+// passes the length equality and can only be refused by the suffix check.
+func TestIsExclusionKeyForStream_ABareStreamIsNotAnExclusionKey(t *testing.T) {
+	require.False(t, isExclusionKeyForStream("//s/x", "//s/x"))
+	require.False(t, isExclusionKeyForStream("", "//s/x"))
+	require.False(t, isExclusionKeyForStream("x1|deadbeefdeadbeef|//s/y", "//s/x"),
+		"a composite for another stream is not this stream's")
+}
