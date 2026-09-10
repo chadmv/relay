@@ -273,20 +273,28 @@ func TestWantDefaultUser_DerivesOSUserWhenDSNCarriesNone(t *testing.T) {
 // wired in", and this is what makes that claim true again.
 func TestAssertDSNTargetsDatabase_UserArmCatchesQueryOverrideOnNoUserinfoDSN(t *testing.T) {
 	// Pin the ambient environment for the same reason
-	// TestWantDefaultUser_DerivesOSUserWhenDSNCarriesNone/no_userinfo does: an
-	// ordinary PGUSER in the shell (root, say) makes pgx.ParseConfig return
-	// that value instead of the OS default, and this test's own "must not
-	// equal root" assertion goes red for a reason unrelated to the guard.
+	// TestWantDefaultUser_DerivesOSUserWhenDSNCarriesNone/no_userinfo does: all
+	// three feed the very derivation under test, so an ordinary PGUSER or
+	// PGSERVICE in a developer's or CI's shell makes this measure the
+	// environment rather than wantDefaultUser.
 	t.Setenv("PGUSER", "")
 	t.Setenv("PGSERVICE", "")
 	t.Setenv("PGSERVICEFILE", "")
 
-	const dsn = "postgres://example.invalid:5432/wanted?user=root"
+	// The injected user must be a string no OS account can be named. This DSN
+	// carries no userinfo, so wantDefaultUser legitimately falls through to the
+	// OS account; an injected value an account could carry makes the assertion
+	// below turn on who owns the process instead of on whether the query
+	// override was adopted. A colon cannot appear in a Unix account name - it
+	// is /etc/passwd's field separator - nor in a Windows one, so the only way
+	// wantUser can equal this is by adopting the query.
+	const injectedUser = "pgdsn-guard:injected-user"
+	dsn := "postgres://example.invalid:5432/wanted?user=" + url.QueryEscape(injectedUser)
 	u, err := url.Parse(dsn)
 	require.NoError(t, err)
 
 	wantUser := wantDefaultUser(t, u)
-	require.NotEqual(t, "root", wantUser,
+	require.NotEqual(t, injectedUser, wantUser,
 		"wantDefaultUser must not itself adopt the query override it exists to let "+
 			"assertDSNTargetsDatabase detect")
 
