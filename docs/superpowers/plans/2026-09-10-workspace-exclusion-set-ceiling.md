@@ -2267,14 +2267,29 @@ If README shows a change outside the three anchors of Task 10, that is a sibling
 ```
 ## Verification
 
-Default lane:        <ok, N packages, Ns>
-worker integration:  <ok | not run: reason>
-perforce p4d lane:   <ok, no SKIP | SKIPPED: reason - this slice's premise guard did not run>
--race:               <ok, container, zero data races | not run: reason>
-eol:                 all touched paths i/lf
-utf8:                ok
-scope fence:         <held | breach and what was reverted>
-migrations:          highest is 000024, none added
+go build ./...:      ok
+go vet ./...:        ok
+go vet -tags integration ./...: ok
+Default lane:        ok, 23 test packages (go test ./... -count=1), all PASS
+worker integration:  ok, twice - 181.8s and 407.7s (the spread is container churn, not a
+                     flake: both runs green). A third verbose run reported 0 SKIP lines.
+perforce p4d lane:   ok, no SKIP. Whole package 218.7s; this slice's premise guard
+                     (TestClient_CreateStreamClient_RefusesAStreamThatDoesNotExist) PASS in
+                     34.6s with its control on the real stream firing first.
+-race:               ok - golang:1.26 Linux container, all 24 packages, zero data races. This
+                     is also the only local run of the //go:build !windows files.
+eol:                 all 13 touched paths read i/lf; zero bare CR in any of them
+utf8:                ok on all 13; the only non-ASCII bytes are pre-existing and unchanged
+                     (README 236, perforce.go 9, handler.go 6)
+gofmt:               2 of my files listed, and 2 of 2 untouched control files in the same
+                     package listed - the working-copy CRLF noise, not a formatting defect.
+                     Ignoring line endings, gofmt wants no change to either file.
+scope fence:         held. Nothing under internal/schedrunner/, cmd/, internal/api/,
+                     internal/jobspec/, internal/store/ or web/; no Makefile change and no
+                     .github/workflows/ change. README's diff is three hunks at 511, 600
+                     and 610 and nothing else.
+migrations:          highest is 000024_worker_workspace_text_bounds, none added
+worktree:            git status --porcelain empty; no mutation left applied
 ```
 
 ---
