@@ -59,16 +59,15 @@ func TestUpsertWorkerWorkspace_TheCheckConstraintRefusesAnOverLongKey(t *testing
 		"the database must refuse this on its own. Without the constraint the row inserts, "+
 			"and the backstop for a future writer that skips the Go chokepoint does not exist.")
 	assert.Contains(t, err.Error(), "source_key",
-		"the constraint's name must say which column refused it - that name is the only "+
+		"the constraint's name must say which column refused it - that name is the whole "+
 			"diagnostic a writer bypassing the Go layer gets")
 }
 
 // TestApplyInventory_ARowAtTheBoundIsStoredAndOneOverIsNot is the end-to-end
 // half. Against a real database, the at-bound row must survive the Go check, the
 // primary key, worker_workspaces_lookup_idx AND the new CHECK - which is what
-// dies if a bound is ever raised past what a btree entry can hold, since all
-// three of source_type, source_key and baseline_hash share one lookup-index
-// entry.
+// dies if a bound is ever raised past what a btree entry can hold, since
+// source_type, source_key and baseline_hash share one lookup-index entry.
 //
 // The pre-existing row is the third assertion and the one a batch-failure
 // implementation cannot satisfy: BeginTxFunc rolling back would leave it in

@@ -392,7 +392,7 @@ type Handler struct {
 	// cmd/relay-server's buildHTTPServer under its OWN section and its OWN
 	// CounterSources field.
 	//
-	// A DIFFERENT NOUN FROM ingestDrops, and neither number covers any part of
+	// A DISTINCT NOUN FROM ingestDrops, and neither number covers any part of
 	// the other. ingestDrops counts LOG LINES THE BUDGET DROPPED; this counts
 	// CHUNKS THE FENCE REJECTED, on an arm that never consults the budget at all.
 	// No input moves both. Do not sum them and do not merge the sections.
@@ -416,18 +416,18 @@ type Handler struct {
 	// wired to GET /v1/server/counters by cmd/relay-server's buildHTTPServer
 	// under its OWN section and its OWN CounterSources field.
 	//
-	// A THIRD DISTINCT NOUN. ingestDrops counts LOG LINES THE BUDGET DROPPED;
+	// A DISTINCT NOUN AGAIN. ingestDrops counts LOG LINES THE BUDGET DROPPED;
 	// taskLogFenceRejects counts LOG CHUNKS AppendTaskLog's fence rejected; this
 	// counts STATUS REPORTS the status fence rejected. No input moves more than
-	// one of the three. Do not sum them and do not merge the sections.
+	// one of them. Do not sum them and do not merge the sections.
 	statusFence statusFenceCounters
 
 	// enrollmentRefusals counts what the two enrollment guards refused, split by
 	// cause. A VALUE, not a pointer, for the same reason its three neighbours are.
 	//
-	// A FOURTH DISTINCT NOUN, and no input moves more than one of the four. Read
+	// A DISTINCT NOUN, and no input moves more than one of these counters. Read
 	// through EnrollmentRefusals. NOT YET ON GET /v1/server/counters - the section
-	// is deliberately deferred to its own item; see the plan's scope decision.
+	// is deliberately deferred to its own item.
 	enrollmentRefusals enrollmentRefusalCounters
 
 	// inventoryRowRejects counts the workspace-inventory rows inventoryUpsertParams
@@ -2281,21 +2281,27 @@ func (h *Handler) applyInventoryUpdate(ctx context.Context, workerID pgtype.UUID
 //
 // It exists as a named method rather than an inline block in Connect so that the
 // budgeted path is testable at the same layer as handleTaskLog and
-// handleTaskStatus, and so the log line has an owner. It adds no logic.
+// handleTaskStatus, and so the log line has an owner.
 //
-// This line needs the budget for the same reason the other three do, and it is
-// the CHEAPEST of the four for an attacker: every string in u is bound straight
-// into UpsertWorkerWorkspace or DeleteWorkerWorkspace, whose source_type,
-// source_key, short_id and baseline_hash columns are all TEXT NOT NULL, so a NUL
-// byte in any of them fails during bind-parameter conversion. And no NUL is even
-// needed: applyInventoryUpdate swallows the time.Parse error on u.LastUsedAt, so
-// an empty string binds SQL NULL into last_used_at, which is also NOT NULL. One
-// error per message either way, with no gate ahead of it.
+// THE TWO ARMS NO LONGER SHARE A SHAPE. The upsert arm goes through
+// inventoryUpsertParams, which refuses an over-long value, a NUL, or a
+// last_used_at that will not store - so a row that used to reach the database and
+// fail its statement is refused ahead of it, costs no round trip, and returns
+// early below without spending a token. The DELETE arm has no such gate and needs
+// none: it binds these values as comparison keys rather than as index tuples.
+// That arm is therefore what is left of the cheap-for-an-attacker path, and it is
+// what TestConnect_InventoryPersistFailuresAreBoundedPerConnection drives.
+//
+// What still reaches the budgeted line from the upsert arm is a genuine store
+// fault, which is not peer-chosen and is what the budget exists for.
 //
 // Key is kindInventory with NO wire value: a persist failure here is an episode,
 // not a per-workspace event, and keying on the source key would multiply one
-// infra event by the workspace count. Never log u itself - source_key is a
-// caller-supplied, unbounded depot path.
+// infra event by the workspace count. NEVER LOG u ITSELF - source_key is a
+// caller-supplied depot path, unbounded on the wire whatever this server will
+// store - and that rule now holds one layer further out too: the refusal
+// inventoryUpsertParams returns carries a column name and a bound and never the
+// value, so even a caller that renders it cannot be logged into by an agent.
 func (h *Handler) handleInventoryUpdate(ctx context.Context, workerID pgtype.UUID, lim *ingestLogLimiter, u *relayv1.WorkspaceInventoryUpdate) {
 	err := h.applyInventoryUpdate(ctx, workerID, u)
 	if err == nil {
