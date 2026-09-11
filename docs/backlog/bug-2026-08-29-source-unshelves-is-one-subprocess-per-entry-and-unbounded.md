@@ -61,3 +61,31 @@ a batching fix carries no retroactivity cost and is preferable for the same reas
   [[bug-2026-08-28-task-and-command-counts-are-unbounded-multipliers]]
 - Sibling axis found in the same pass:
   [[bug-2026-08-29-perforce-workspace-admission-is-quadratic-under-the-mutex]]
+
+## Amendment 2026-09-10
+
+**A fourth count bound landed, so the Proposal's "if a fourth count bound is ever added" is now
+"a fifth".** `maxSyncEntries = 512` shipped in [#207](https://github.com/chadmv/relay/pull/207),
+closing [[idea-2026-09-04-source-sync-has-no-entry-count-bound]] - the other per-entry axis on this
+same `source` spec. That slice's retroactivity argument is the precedent this item asked for: no
+grandfathering, a stored spec over the bound stops firing and records why in
+`scheduled_jobs.last_error`, and the bound is non-configurable for the reason `maxRetries` states.
+
+**This item is NOT closed by that slice, and the sync item's own framing is why the confusion is
+possible.** That item claimed the sync axis was "the only one of the three with no bound at all",
+which was false precisely because this item exists. The claim is corrected in the closed item's
+resolution note. Read this one as *sharper* now, not resolved: it is the remaining unbounded
+per-entry axis on the source spec, and the sync slice did not touch `Unshelves`.
+
+**One measurement from that slice transfers and is worth carrying.** The sync cap does not reduce the
+per-REQUEST aggregate, because `validateSourceSpec` runs per TASK and `maxTasksPerJob` is 5000 - one
+1 MiB body still carries about 72 tasks at the cap. Any bound proposed here inherits that property,
+so price it as a per-spec concentration control and do not claim an aggregate reduction it cannot
+deliver. The honest comparison on byte density stands: two bytes per unshelve entry against 25 for
+the cheapest legal sync entry.
+
+**Check the batching question before the bound, as the Proposal already says.** The sync slice is
+evidence for that ordering rather than against it: its cap sits ABOVE the platform command-line limit
+that the one un-batched `p4 sync` invocation reaches, which is now its own item
+([[bug-2026-09-10-syncstream-argv-length-is-unbounded]]). A count bound that leaves the per-entry
+subprocess shape alone buys less than it appears to.

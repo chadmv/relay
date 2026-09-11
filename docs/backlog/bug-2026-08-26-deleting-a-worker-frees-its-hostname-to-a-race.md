@@ -5,6 +5,7 @@ status: open
 created: 2026-08-26
 priority: medium
 source: 2026-08-26 worker-delete slice - security lens; scoped out deliberately as documentation
+parent: feature-2026-09-10-settle-the-worker-hostname-index-in-one-pass
 ---
 
 # Deleting a worker frees its hostname to whoever claims it first
