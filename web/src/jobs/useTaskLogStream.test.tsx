@@ -128,7 +128,17 @@ test('a recovery pumps since_seq from next_seq until next_seq is 0', async () =>
   expect(searches).toEqual(['?order=desc&limit=200'])
 
   fake.latest().emit('dropped', { reason: 'slow_consumer' })
-  await waitFor(() => expect(result.current.status).toBe('live'))
+  // The drop arrives through the stream body, so the move to 'recovering' is
+  // asynchronous: 'live' is still the status held here, and waiting for it
+  // waits for nothing. The pump's own output is the signal that it finished.
+  await waitFor(() =>
+    expect(result.current.rows.filter((r) => r.kind === 'line').map((r) => r.text)).toEqual([
+      'line-10',
+      'line-20',
+      'line-30',
+    ]),
+  )
+  expect(result.current.status).toBe('live')
 
   // Direction is decided by what we hold: maxSeq is 10, so the recovery pages
   // FORWARD and pumps until next_seq is 0. No order parameter on any of them.
@@ -136,11 +146,6 @@ test('a recovery pumps since_seq from next_seq until next_seq is 0', async () =>
     '?order=desc&limit=200',
     '?limit=200&since_seq=10',
     '?limit=200&since_seq=20',
-  ])
-  expect(result.current.rows.filter((r) => r.kind === 'line').map((r) => r.text)).toEqual([
-    'line-10',
-    'line-20',
-    'line-30',
   ])
   expect(result.current.historyTruncated).toBe(false)
   expect(result.current.total).toBe(3)
@@ -447,7 +452,10 @@ test('a discarded earlier page re-enables the control', async () => {
 
   // A drop-recovery bumps the generation while the earlier page is in flight.
   fake.latest().emit('dropped', { reason: 'slow_consumer' })
-  await waitFor(() => expect(result.current.status).toBe('live'))
+  // The recovery's own page is what proves the generation moved. 'live' is
+  // already the status held here, so releasing on it would let the gated page
+  // land against the generation this test needs it to miss.
+  await waitFor(() => expect(result.current.rows.some((r) => r.text === 'line-11')).toBe(true))
   release()
   await waitFor(() => expect(result.current.loadingEarlier).toBe(false))
 
@@ -584,7 +592,11 @@ test('an event: dropped frame produces exactly ONE re-backfill plus a permanent 
   // recovery - hence the exact counts below rather than "at least".
   first.close()
 
-  await waitFor(() => expect(result.current.status).toBe('live'))
+  // Both frames are delivered through the stream body, so 'live' is still the
+  // status held here and waiting for it waits for nothing. The recovery's own
+  // re-backfill request is the signal; the exact counts below still pin that a
+  // SECOND recovery never happens.
+  await waitFor(() => expect(requests).toBeGreaterThanOrEqual(2))
   expect(requests).toBe(2)
   expect(fake.connections).toHaveLength(2)
   expect(first.aborted).toBe(true)
@@ -959,13 +971,17 @@ test('a manual reconnect after a drop preserves the marker and pages from maxSeq
 
   // Cause a drop: one immediate re-backfill, marker inserted, maxSeq now 2.
   fake.latest().emit('dropped', { reason: 'slow_consumer' })
-  await waitFor(() => expect(result.current.status).toBe('live'))
+  // The re-backfill's page is the signal it ran; 'live' is already the status
+  // held here and waits for nothing.
+  await waitFor(() =>
+    expect(result.current.rows.filter((r) => r.kind === 'line').map((r) => r.text)).toEqual([
+      'line-1',
+      'line-2',
+    ]),
+  )
+  expect(result.current.status).toBe('live')
   expect(result.current.dropped).toBe(true)
   expect(result.current.rows.some((r) => r.kind === 'marker')).toBe(true)
-  expect(result.current.rows.filter((r) => r.kind === 'line').map((r) => r.text)).toEqual([
-    'line-1',
-    'line-2',
-  ])
 
   // Manual reconnect while still live (not the terminal-task carry path).
   await act(async () => {
