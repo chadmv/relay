@@ -116,3 +116,40 @@ list this is the kind of item that can absorb triage without converging.** It is
 observations are real, they were made by two lanes independently, and the alternative is that the next
 person to see a red run on an unmodified file starts the same investigation from zero. Step 1 is bounded
 - two batches of runs and two numbers - and a negative result closes the item honestly.
+
+### 2026-09-11: one offender reproduced, and it is not concurrency-dependent
+
+`web-ci` on `main` (run 34563371016) failed
+`src/jobs/useTaskLogStream.test.tsx > a recovery pumps since_seq from next_seq until next_seq is 0`
+with `expected [ 'line-10' ] to deeply equal [ 'line-10', 'line-20', 'line-30' ]`, on a tree that had
+passed web-ci minutes earlier on PR #212's run. This is the shape this item describes - and for the
+first time the cause was established rather than observed.
+
+**The mechanism, measured.** `fakeSseServer.emit()` enqueues into a `ReadableStream`, so a `dropped`
+frame is delivered asynchronously. An `await waitFor(() => expect(status).toBe('live'))` written
+after that emit is satisfied by the status ALREADY held: `waitFor` runs its callback once,
+synchronously, it passes, and the wait returns without ever polling. A probe recorded exactly that -
+one callback invocation, `status=live`, one request issued, the recovery not yet started. The test's
+only remaining synchronization is RTL `asyncWrapper`'s trailing `setTimeout(0)` drain, so whether it
+passes depends on how much of an async cascade fits in one macrotask turn.
+
+**Deterministic reproduction.** Injecting a single `await new Promise((r) => setTimeout(r, 0))`
+before the final page's response reproduces the CI failure exactly, including its otherwise puzzling
+shape: the recorded query strings hold all three requests (they were ISSUED) while the rows still
+hold only `['line-10']`, because the hook's `ingest()` merely schedules a `FLUSH_MS` publish and the
+loop's closing `flushNow()` has not run.
+
+**What this changes for this item.** Two things, and the second narrows the item's premise:
+
+1. Step 2 ("identify the offenders") now has a directed instrument rather than "collect failing
+   names across runs": grep every `waitFor` in `web/src` and ask whether its condition could already
+   be true before the awaited event. Four sites in this one file had the shape and only one had ever
+   gone red, so red-run frequency badly undercounts it.
+2. This offender is **not** concurrency-dependent in the way the item hypothesizes. Worker count is
+   not the variable; any scheduling pressure that pushes one step of the cascade past a macrotask
+   boundary will do. So a both-ways measurement at pinned versus default `maxThreads` (step 1) can
+   come back flat and this class of defect still be present. A flat step-1 result should therefore
+   no longer be read as closing the item on its own.
+
+The four sites were fixed in `docs/retros/2026-09-11-tasklog-recovery-test-sync.md`'s branch; the
+item stays open for the sweep, which was not done.
