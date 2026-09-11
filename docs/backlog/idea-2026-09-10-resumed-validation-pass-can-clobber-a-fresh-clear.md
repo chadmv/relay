@@ -16,6 +16,11 @@ nowhere. The obvious improvement - finish the remainder in a later pass, after t
 - cannot be written safely today, because that pass would run concurrently with the scheduler runner
 and `RecordScheduledJobFailure`'s fence does not cover the clearing statement.
 
+**This item does not prescribe a fence, and an earlier filename did.** It was filed as
+`...-needs-a-fence`, which named the remedy in the identifier a reader sees first while the body
+explains why that remedy has a real cost. Renamed to describe the defect instead. The open question
+is what to do, not how.
+
 ## Context
 
 The sweep's safety argument while it runs pre-listener is that nothing else in the process is running.
