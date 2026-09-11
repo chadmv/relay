@@ -161,6 +161,36 @@ cannot fire on the Go commit that renames the symbol, so it belongs on the Go si
 `python/tests/integration/` is accepted as a
 manual lane, so an assertion whose only home is there is not evidence.
 
+**A `go/parser` guard cannot be mutation-tested through `go test -overlay`, and the failure is
+silent.** The wiring guards over `cmd/relay-server/main.go` call `parser.ParseFile` on the path
+directly, which is ordinary file I/O the build overlay never intercepts - so the compiled test reads
+the ON-DISK file while the overlay feeds the mutant only to the compiler. On 2026-09-10 a mutation
+of `main.go`'s argument order reported `ok` with the mutant plainly present in the overlay file,
+which is a survived-looking result from a mutation the test never saw. Mutate these in a full tree
+copied OUTSIDE the repo, and before trusting any overlay battery, prove the overlay is live by
+introducing a deliberate compile error and checking the error names the overlay path.
+
+### Two measurement traps that produce false negatives
+
+Both were hit on 2026-09-10 and both look like a passing test.
+
+- **`strings.Repeat` of one character is TOAST-compressible.** A test probing a storage-size limit -
+  a btree entry, a row size, anything Postgres may compress - can sail past the limit it means to
+  prove. Measured: with the `worker_workspaces` byte bounds raised to 1000 each, a three-column row
+  built with `strings.Repeat` INSERTS FINE at 3000 bytes, while the same row built from
+  incompressible text fails with `index row size 3024 exceeds btree version 4 maximum 2704`.
+  Generate incompressible values and assert the distinct-byte count, so the fixture cannot silently
+  regress to a run of one character. And max every component of a composite limit in the SAME row:
+  maxing one column at a time proves a smaller case and reads as if it proved the real one.
+- **A matcher that discriminates on SQL text must be tested against the GENERATED statement, not
+  the `.sql` source.** sqlc expands `SELECT *` into an explicit column list, so a needle that looks
+  discriminating in the query file can match nothing, or match everything. Measured: excluding on the
+  bare column `next_run_at` to separate the sweep's read from the reconcile's matches NEITHER,
+  because the expanded column list contains that column; the needle has to be the whole predicate
+  `next_run_at < NOW()`. Read the `const` in the generated `*.sql.go`, and when you add a
+  discriminator to one of a matched pair of predicates, add it to both - a one-sided fix is a trap
+  for whoever next traces both statements through one tracer.
+
 ## Architecture
 
 Three binaries: **`relay-server`** (HTTP `:8080` + gRPC `:9090` + scheduler), **`relay-agent`** (worker; gRPC stream to server; runs tasks as subprocesses), **`relay`** (CLI client). Full architecture, env vars, REST API, and CLI reference live in [README.md](README.md).
