@@ -5,6 +5,7 @@ status: open
 created: 2026-08-25
 priority: medium
 source: 2026-08-25 auto-enroll-guards slice - scoped out of that slice deliberately, and it is what makes the new fault log site pre-auth reachable
+parent: feature-2026-09-10-settle-the-worker-hostname-index-in-one-pass
 ---
 
 # reg.Hostname is unvalidated and reaches a unique btree, making a pre-auth log site reachable
