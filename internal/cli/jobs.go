@@ -98,6 +98,7 @@ type taskResp struct {
 	RetryCount     int32           `json:"retry_count"`
 	DependsOn      []string        `json:"depends_on,omitempty"`
 	WorkerID       string          `json:"worker_id,omitempty"`
+	WorkerName     string          `json:"worker_name,omitempty"`
 }
 
 // ─── Commands ─────────────────────────────────────────────────────────────────
