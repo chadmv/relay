@@ -21,8 +21,8 @@ Both places show the worker's **name** as a link to `/workers/{worker_id}`.
   `store.Task` and its other callers are untouched.
 - `taskResponse` gains `WorkerName string \`json:"worker_name,omitempty"\``.
 - `handleGetJob` collects the distinct non-NULL `worker_id`s of the job's tasks, calls the query
-  once (skipped when there are none), and passes an id-to-name map into `toJobResponse`, which
-  sets `WorkerName` per task. A query error answers 500, like every other read in that handler.
+  once (skipped when there are none), and sets `WorkerName` on the response's tasks, which
+  `toJobResponse` builds index-aligned with `tasks`. `toJobResponse`'s signature is unchanged. A query error answers 500, like every other read in that handler.
 - Scope: only `GET /v1/jobs/{id}`, the endpoint both pages read through `useJob`. Other endpoints
   returning `taskResponse` (`/v1/jobs/{id}/tasks`, `/v1/tasks/{id}`, `/v1/workers/{id}/tasks`) are
   unchanged; the field is `omitempty`, so they simply omit it.
