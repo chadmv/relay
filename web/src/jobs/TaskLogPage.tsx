@@ -1,6 +1,7 @@
 import { Link, useParams } from 'react-router-dom'
 import { GlassPanel } from '../components/holo'
 import { LogView } from './LogView'
+import { TaskWorkerLink } from './TaskWorkerLink'
 import { useJob } from './useJob'
 import { useTaskLogStream } from './useTaskLogStream'
 import { isTerminalTask, taskStatusColor } from './taskStatus'
@@ -61,7 +62,7 @@ export function TaskLogPage() {
           {task.status}
         </span>
         <span className="font-mono text-[11px] text-fg-mute">
-          worker {task.worker_id ? task.worker_id.slice(0, 6) : '-'} · retry {task.retry_count}/{task.retries}
+          worker <TaskWorkerLink task={task} /> · retry {task.retry_count}/{task.retries}
         </span>
       </div>
 
