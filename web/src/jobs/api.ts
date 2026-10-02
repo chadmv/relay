@@ -169,6 +169,9 @@ export interface TaskDetail {
   retry_count: number
   depends_on?: string[]
   worker_id?: string
+  // Resolved server-side on GET /v1/jobs/:id only; absent when the task has no
+  // worker or the worker row is gone.
+  worker_name?: string
 }
 
 // GET /v1/jobs/:id. NOTE: the detail endpoint does NOT return total_tasks,
