@@ -22,7 +22,7 @@ const JOB = {
     {
       id: 't1', name: 'frame-001', status: 'running',
       commands: [['blender', '-b']], env: null, requires: null,
-      timeout_seconds: null, retries: 1, retry_count: 0, worker_id: 'w1abcdef',
+      timeout_seconds: null, retries: 1, retry_count: 0, worker_id: 'w1abcdef', worker_name: 'render-node-07',
     },
   ],
 }
@@ -65,7 +65,7 @@ test('the /jobs/:id/tasks/:taskId route renders the header and tails the task', 
   // worker, endpoint caption, LIVE badge, follow-tail.
   expect(screen.getByRole('link', { name: /job detail/i })).toHaveAttribute('href', '/jobs/j1')
   expect(screen.getByText('running')).toBeInTheDocument()
-  expect(screen.getByText(/w1abcd/)).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'render-node-07' })).toHaveAttribute('href', '/workers/w1abcdef')
   expect(screen.getByText('/v1/events?task_id=t1 · single-task stream')).toBeInTheDocument()
   expect(screen.getByText('LIVE')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: /follow tail/i })).toBeInTheDocument()

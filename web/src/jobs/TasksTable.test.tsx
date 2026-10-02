@@ -1,8 +1,14 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import type { ReactElement } from 'react'
+import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi } from 'vitest'
 import { TasksTable } from './TasksTable'
 import type { TaskDetail } from './api'
+
+function renderTable(ui: ReactElement) {
+  return render(<MemoryRouter>{ui}</MemoryRouter>)
+}
 
 function task(over: Partial<TaskDetail>): TaskDetail {
   return {
@@ -13,11 +19,11 @@ function task(over: Partial<TaskDetail>): TaskDetail {
 
 const tasks: TaskDetail[] = [
   task({ id: 't1', name: 'frame-001', status: 'done' }),
-  task({ id: 't2', name: 'denoise', status: 'running', depends_on: ['frame-001'], worker_id: 'w9abc123' }),
+  task({ id: 't2', name: 'denoise', status: 'running', depends_on: ['frame-001'], worker_id: 'w9abc123', worker_name: 'render-node-07' }),
 ]
 
 test('renders each task name and status', () => {
-  render(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={() => {}} />)
+  renderTable(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={() => {}} />)
   // 'frame-001' appears twice: as the first row's name cell and as the second
   // row's deps cell (denoise depends_on ['frame-001']).
   expect(screen.getAllByText('frame-001')).toHaveLength(2)
@@ -26,7 +32,7 @@ test('renders each task name and status', () => {
 })
 
 test("the selected task's control is marked aria-current and no row carries aria-selected", () => {
-  const { container } = render(<TasksTable tasks={tasks} selectedTaskId="t2" onSelect={() => {}} />)
+  const { container } = renderTable(<TasksTable tasks={tasks} selectedTaskId="t2" onSelect={() => {}} />)
   // See TasksTable.tsx for why: no aria-selected, no interactive row.
   // aria-current is valid on any element and is not conditional on the
   // container role.
@@ -37,7 +43,7 @@ test("the selected task's control is marked aria-current and no row carries aria
 })
 
 test('the name-cell button carries a negative-offset focus ring, not the browser default', () => {
-  render(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={() => {}} />)
+  renderTable(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={() => {}} />)
   const button = screen.getByRole('button', { name: 'frame-001' })
   // The button fills its TableCell exactly (w-full) and both carry `truncate`
   // (overflow: hidden), so a ring drawn OUTSIDE the border box is clipped by the
@@ -56,7 +62,7 @@ test('the name-cell button carries a negative-offset focus ring, not the browser
 
 test('each task row exposes a button named for the task, and one activation selects once', async () => {
   const onSelect = vi.fn()
-  render(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={onSelect} />)
+  renderTable(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={onSelect} />)
   expect(screen.getByRole('button', { name: 'frame-001' })).toBeInTheDocument()
   const denoise = screen.getByRole('button', { name: 'denoise' })
   await userEvent.click(denoise)
@@ -68,18 +74,33 @@ test('each task row exposes a button named for the task, and one activation sele
 
 test('clicking a non-button cell in a row calls onSelect with its id (row-level handler, not just the button)', async () => {
   const onSelect = vi.fn()
-  render(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={onSelect} />)
+  renderTable(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={onSelect} />)
   // 'running' is denoise's STATUS cell, a plain text node with no button
   // ancestor - unlike 'denoise' itself, which resolves inside the name-cell
   // button and so cannot tell a row handler apart from a button-only one.
   await userEvent.click(screen.getByText('running'))
   expect(onSelect).toHaveBeenCalledWith('t2')
-  // The table has no anchors: task selection is a click or key action, never
-  // navigation.
-  expect(screen.queryByRole('link')).not.toBeInTheDocument()
+  // Task selection is a click or key action, never navigation: the only link in
+  // the table is the worker link, which leaves for the worker page.
+  const links = screen.getAllByRole('link')
+  expect(links).toHaveLength(1)
+  expect(links[0]).toHaveAttribute('href', '/workers/w9abc123')
+})
+
+test('the worker cell shows the worker name as a link to the worker page', () => {
+  renderTable(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={() => {}} />)
+  expect(screen.getByRole('link', { name: 'render-node-07' })).toHaveAttribute('href', '/workers/w9abc123')
+  expect(screen.queryByText('w9abc1')).not.toBeInTheDocument()
+})
+
+test('following the worker link does not select the row', async () => {
+  const onSelect = vi.fn()
+  renderTable(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={onSelect} />)
+  await userEvent.click(screen.getByRole('link', { name: 'render-node-07' }))
+  expect(onSelect).not.toHaveBeenCalled()
 })
 
 test('shows an empty state when there are no tasks', () => {
-  render(<TasksTable tasks={[]} selectedTaskId="" onSelect={() => {}} />)
+  renderTable(<TasksTable tasks={[]} selectedTaskId="" onSelect={() => {}} />)
   expect(screen.getByText(/no tasks/i)).toBeInTheDocument()
 })

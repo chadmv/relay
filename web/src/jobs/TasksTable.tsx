@@ -8,6 +8,7 @@ import {
   type TableColumn,
 } from '../components/holo'
 import type { TaskDetail } from './api'
+import { TaskWorkerLink } from './TaskWorkerLink'
 import { taskStatusColor } from './taskStatus'
 
 const COLS = 'grid-cols-[1fr_110px_80px_120px_1fr]'
@@ -36,7 +37,9 @@ const HEADERS: TableColumn[] = [
 // a stopPropagation anywhere in the cell, breaks one input mode and not the other:
 // `each task row exposes a button named for the task, and one activation selects
 // once` pins the call count, and the job-detail describe in web/e2e/keyboard.spec.ts
-// pins the key-press half in a real browser.
+// pins the key-press half in a real browser. That rule is for the name-cell button;
+// the worker cell's link is navigation, not selection, and stops its click from
+// reaching the row, pinned by `following the worker link does not select the row`.
 //
 // NO aria-selected AND NO interactive row element: this table implements
 // neither grid nor listbox semantics, so it advertises none. aria-selected is
@@ -45,8 +48,7 @@ const HEADERS: TableColumn[] = [
 // button instead, which is valid on any element.
 //
 // No per-task duration/percent column: the API returns neither per-task timing nor
-// a percent (docs/backlog/feature-2026-07-01-per-task-timing.md). The worker cell
-// stays plain text; a link to the worker is a deferred follow-up.
+// a percent (docs/backlog/feature-2026-07-01-per-task-timing.md).
 export function TasksTable({
   tasks,
   selectedTaskId,
@@ -97,7 +99,9 @@ export function TasksTable({
               <TableCell className="text-fg-mute">
                 {t.retry_count}/{t.retries}
               </TableCell>
-              <TableCell className="truncate text-fg-mute">{t.worker_id ? t.worker_id.slice(0, 6) : '-'}</TableCell>
+              <TableCell className="truncate text-fg-mute">
+                <TaskWorkerLink task={t} />
+              </TableCell>
               <TableCell className="truncate text-fg-mute">
                 {t.depends_on && t.depends_on.length > 0 ? t.depends_on.join(', ') : '-'}
               </TableCell>

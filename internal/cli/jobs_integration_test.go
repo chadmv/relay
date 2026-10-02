@@ -393,9 +393,9 @@ func rawGET(t *testing.T, s *relayServer, path string) []byte {
 // calls it, so a json-tag rename on any of those four passes here for
 // exactly the reason DependsOn/WorkerID's omitempty used to hide them from
 // this same test before that was fixed. This is the only guard that fails
-// CLOSED on the nested `tasks` array and on whichever of taskResponse's 11
+// CLOSED on the nested `tasks` array and on whichever of taskResponse's 12
 // tags (id, name, status, commands, env, requires, timeout_seconds, retries,
-// retry_count, depends_on, worker_id) no named assertion elsewhere in the
+// retry_count, depends_on, worker_id, worker_name) no named assertion elsewhere in the
 // PACKAGE already covers - not just this file. name and retry_count are
 // pinned by TestIntegration_GetJobJSON_CarriesLabelsAndTaskRetryCount and
 // commands by TestIntegration_GetJobJSON_CarriesTheTasksCommands, both in

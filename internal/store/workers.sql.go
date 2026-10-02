@@ -542,6 +542,38 @@ func (q *Queries) ListRevokedWorkersPage(ctx context.Context, arg ListRevokedWor
 	return items, nil
 }
 
+const listWorkerNamesByIDs = `-- name: ListWorkerNamesByIDs :many
+SELECT id, name FROM workers WHERE id = ANY($1::uuid[])
+`
+
+type ListWorkerNamesByIDsRow struct {
+	ID   pgtype.UUID `json:"id"`
+	Name string      `json:"name"`
+}
+
+// ListWorkerNamesByIDs
+//
+//	SELECT id, name FROM workers WHERE id = ANY($1::uuid[])
+func (q *Queries) ListWorkerNamesByIDs(ctx context.Context, ids []pgtype.UUID) ([]ListWorkerNamesByIDsRow, error) {
+	rows, err := q.db.Query(ctx, listWorkerNamesByIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListWorkerNamesByIDsRow
+	for rows.Next() {
+		var i ListWorkerNamesByIDsRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listWorkers = `-- name: ListWorkers :many
 SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers ORDER BY name
 `
