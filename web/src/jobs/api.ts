@@ -169,8 +169,7 @@ export interface TaskDetail {
   retry_count: number
   depends_on?: string[]
   worker_id?: string
-  // Resolved server-side on GET /v1/jobs/:id only; absent when the task has no
-  // worker or the worker row is gone.
+  // Absent when the task has no worker or the worker row is gone.
   worker_name?: string
 }
 

@@ -35,23 +35,26 @@ func getJobTasks(t *testing.T, srv *api.Server, token, jobID string) (int, []map
 
 // The worker's name ("retry-w") differs from its hostname ("retry-host") and its
 // id, so the assertion fails if the handler reads the wrong column. The pending
-// task has no worker and must carry no worker_name key at all.
+// task has no worker and must carry no worker_name key at all. Two tasks share
+// one worker, so a lookup that resolves each distinct worker once must still name both.
 func TestGetJob_TaskCarriesItsWorkersName(t *testing.T) {
 	e := newRetryEnv(t)
 	owner := createTestUser(t, e.q, "Owner", "worker-name@example.com", false)
 	token := createTestToken(t, e.q, owner.ID)
 	job := e.job(t, owner.ID)
 	e.task(t, job, "assigned", "running")
+	e.task(t, job, "assigned-too", "running")
 	e.task(t, job, "unassigned", "pending")
 
 	code, tasks := getJobTasks(t, e.srv, token, uuidString(job.ID))
 	require.Equal(t, http.StatusOK, code)
-	require.Len(t, tasks, 2)
+	require.Len(t, tasks, 3)
 	byName := map[string]map[string]any{}
 	for _, tk := range tasks {
 		byName[tk["name"].(string)] = tk
 	}
 	require.Equal(t, "retry-w", byName["assigned"]["worker_name"])
+	require.Equal(t, "retry-w", byName["assigned-too"]["worker_name"])
 	require.Equal(t, uuidString(e.w.ID), byName["assigned"]["worker_id"])
 	_, has := byName["unassigned"]["worker_name"]
 	require.False(t, has, "a task with no worker must omit worker_name")
