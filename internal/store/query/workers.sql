@@ -340,3 +340,6 @@ WHERE status = 'revoked'
    ))
 ORDER BY revoked_at DESC NULLS LAST, id DESC
 LIMIT @page_limit + 1;
+
+-- name: ListWorkerNamesByIDs :many
+SELECT id, name FROM workers WHERE id = ANY(@ids::uuid[]);

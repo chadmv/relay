@@ -51,6 +51,7 @@ type taskResponse struct {
 	RetryCount     int32           `json:"retry_count"`
 	DependsOn      []string        `json:"depends_on,omitempty"`
 	WorkerID       string          `json:"worker_id,omitempty"`
+	WorkerName     string          `json:"worker_name,omitempty"`
 }
 
 type jobResponse struct {
@@ -825,7 +826,30 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, toJobResponse(job, row.SubmittedByEmail, tasks, taskDeps))
+	resp := toJobResponse(job, row.SubmittedByEmail, tasks, taskDeps)
+	var workerIDs []pgtype.UUID
+	seen := make(map[pgtype.UUID]bool)
+	for _, t := range tasks {
+		if t.WorkerID.Valid && !seen[t.WorkerID] {
+			seen[t.WorkerID] = true
+			workerIDs = append(workerIDs, t.WorkerID)
+		}
+	}
+	if len(workerIDs) > 0 {
+		rows, err := s.q.ListWorkerNamesByIDs(ctx, workerIDs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "db error")
+			return
+		}
+		names := make(map[pgtype.UUID]string, len(rows))
+		for _, wn := range rows {
+			names[wn.ID] = wn.Name
+		}
+		for i, t := range tasks {
+			resp.Tasks[i].WorkerName = names[t.WorkerID]
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // jobOwnerOr404 is the shared owner-or-admin gate for the two destructive
